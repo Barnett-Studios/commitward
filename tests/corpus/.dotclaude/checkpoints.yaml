@@ -1,0 +1,27 @@
+version: "1"
+checkpoints:
+  - name: gate-self-mod
+    summary: "Modifying the HITL detector or its registry (changes the gate)"
+    standards_doc: "docs/adrs/0010-gate-self-protection.md"
+    paths:
+      - "(^|/)crates/dotclaude-core/src/detect_hitl\\.rs$"
+      - "(^|/)crates/dotclaude-core/src/git\\.rs$"
+      - "(^|/)promise/checkpoints\\.yaml$"
+      - "(^|/)\\.dotclaude/checkpoints\\.yaml$"
+      - "(^|/)scripts/git-hooks/commit-msg$"
+      - "(^|/)crates/dotclaude/src/main\\.rs$"
+      - "(^|/)crates/dotclaude-core/src/paths\\.rs$"
+      - "(^|/)scripts/install-git-hooks\\.sh$"
+  - name: checkpoint-removed
+    summary: "A HITL checkpoint was removed from a registry (gate weakened)"
+    standards_doc: "docs/adrs/0010-gate-self-protection.md"
+    semantic: checkpoint_removed
+  - name: framework-core-change
+    summary: "Change to the measurement contract or live-loop wiring"
+    standards_doc: "docs/adrs/0006-hitl-boundary-gate-third-track.md"
+    paths:
+      - "(^|/)crates/dotclaude-core/src/(engine|trust|reviewer|ledger)\\.rs$"
+      - "(^|/)crates/dotclaude-core/src/verify/"
+      - "(^|/)crates/dotclaude-core/src/hooks/"
+      - "(^|/)promise/registry\\.yaml$"
+      - "(^|/)\\.claude/settings\\.json$"

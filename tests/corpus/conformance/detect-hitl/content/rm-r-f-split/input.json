@@ -1,0 +1,7 @@
+{
+  "files": [{"status": "M", "path": "scripts/clean.sh"}],
+  "added_lines": {
+    "scripts/clean.sh": ["rm -r -f \"$BUILD_DIR\""]
+  },
+  "base_checkpoint_names": null
+}

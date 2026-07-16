@@ -1,0 +1,1 @@
+"feat: feature with noise\n\nHITL-ACK-NOT-VALID: this should not match\nHITL-ACK: gate-self-mod valid reason\nnot-hitl-ack: also-not-valid\n"

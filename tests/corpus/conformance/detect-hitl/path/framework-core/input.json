@@ -1,0 +1,5 @@
+{
+  "files": [{"status": "M", "path": "crates/dotclaude-core/src/engine.rs"}],
+  "added_lines": {},
+  "base_checkpoint_names": null
+}

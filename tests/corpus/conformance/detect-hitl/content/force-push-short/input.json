@@ -1,0 +1,7 @@
+{
+  "files": [{"status": "M", "path": "scripts/deploy.sh"}],
+  "added_lines": {
+    "scripts/deploy.sh": ["git push -f origin main"]
+  },
+  "base_checkpoint_names": null
+}

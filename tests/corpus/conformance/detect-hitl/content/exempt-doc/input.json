@@ -1,0 +1,7 @@
+{
+  "files": [{"status": "M", "path": "docs/guide.md"}],
+  "added_lines": {
+    "docs/guide.md": ["git reset --hard HEAD~1"]
+  },
+  "base_checkpoint_names": null
+}

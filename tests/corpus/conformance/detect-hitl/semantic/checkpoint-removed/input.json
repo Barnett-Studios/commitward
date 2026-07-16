@@ -1,0 +1,12 @@
+{
+  "files": [{"status": "M", "path": ".dotclaude/checkpoints.yaml"}],
+  "added_lines": {},
+  "base_checkpoint_names": [
+    "agent-instructions-self-mod",
+    "destructive-ops",
+    "gate-self-mod",
+    "checkpoint-removed",
+    "framework-core-change",
+    "old-security-check"
+  ]
+}

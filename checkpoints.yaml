@@ -1,0 +1,59 @@
+version: "1"
+checkpoints:
+  - name: agent-instructions-self-mod
+    summary: "Editing agent-governing instructions (CLAUDE.md / AGENTS.md / rules)"
+    standards_doc: "docs/adrs/0007-checkpoint-registry-data-semantic-code.md"
+    paths:
+      - "(^|/)CLAUDE\\.md$"
+      - "(^|/)AGENTS\\.md$"
+      - "(^|/)rules/.*\\.md$"
+  - name: destructive-ops
+    summary: "Destructive git/filesystem command entering a committed file"
+    standards_doc: "docs/adrs/0009-global-commit-msg-hook-failopen.md"
+    content:
+      # Force-push — fires on --force but NOT the safe --force-with-lease
+      # variant (silenced 2026-07-16). The short -f form is position-anchored
+      # via the trailing space in ([^\n]* )? so a benign branch name like
+      # `my-feature-off` cannot trip it.
+      - "git +push +[^\\n]*--force($|[^-])"
+      - "git +push +([^\\n]* )?-[a-zA-Z]*f($|[^a-zA-Z])"
+      # History rewrite — anchored to a `git ` (space or hyphen) prefix so a
+      # bare textual mention in a comment / string / identifier does not fire.
+      - "git[ -]filter-branch"
+      - "git[ -]filter-repo"
+      - "git +reset +--hard"
+      - "checkout +--orphan"
+      # Force-delete a branch — (?-i:-D) keeps this token case-SENSITIVE
+      # (compile_ci forces case-insensitive) so the safe merged-only
+      # `git branch -d` does NOT fire, only the force `-D`.
+      - "git +branch +(?-i:-D)"
+      - "update-ref +-d"
+      - "reflog +expire"
+      # NOTE: `git gc --prune` was removed 2026-07-16 — routine maintenance
+      # (drops only unreachable objects), not work-destroying. See ADR-0009.
+      # rm recursive+force — NARROWED to a DANGEROUS target so benign cleanup
+      # (`rm -rf ./build`, `.terraform`, `node_modules`, `/tmp/x`) no longer
+      # fires. Both a recursive AND a force flag must be present (so `rm -f x`
+      # and `rm -r x` alone do not fire), THEN a whitespace-preceded dangerous
+      # target somewhere in the argument list: root `/` or `/*`, home `~`, an
+      # (unexpanded) variable/command-substitution `$`/backtick — the classic
+      # `rm -rf $EMPTY/` footgun — or a system root dir. Scripts are STILL
+      # checked; only the benign targets stop firing. The danger tail is
+      # inlined per pattern (regex has no shared sub-expressions). See ADR-0009.
+      # Combined flags (`rm -rf` / `-fr`):
+      - "rm +-[a-zA-Z]*r[a-zA-Z]*f[^\\n]*[ \\t]+[\"]?(/([ \\t*]|$)|~([ \\t/]|$)|[$`]|/(etc|usr|var|bin|sbin|lib|lib64|boot|sys|proc|dev|root|opt|home|users|library|system)([ \\t/]|$))"
+      - "rm +-[a-zA-Z]*f[a-zA-Z]*r[^\\n]*[ \\t]+[\"]?(/([ \\t*]|$)|~([ \\t/]|$)|[$`]|/(etc|usr|var|bin|sbin|lib|lib64|boot|sys|proc|dev|root|opt|home|users|library|system)([ \\t/]|$))"
+      # Split short flags (rm -r -f / rm -f -r) and long flags (rm --recursive
+      # --force), either order — same dangerous-target requirement:
+      - "rm +[^\\n]*(-[a-zA-Z]*r|--recursive)[^\\n]*(-[a-zA-Z]*f|--force)[^\\n]*[ \\t]+[\"]?(/([ \\t*]|$)|~([ \\t/]|$)|[$`]|/(etc|usr|var|bin|sbin|lib|lib64|boot|sys|proc|dev|root|opt|home|users|library|system)([ \\t/]|$))"
+      - "rm +[^\\n]*(-[a-zA-Z]*f|--force)[^\\n]*(-[a-zA-Z]*r|--recursive)[^\\n]*[ \\t]+[\"]?(/([ \\t*]|$)|~([ \\t/]|$)|[$`]|/(etc|usr|var|bin|sbin|lib|lib64|boot|sys|proc|dev|root|opt|home|users|library|system)([ \\t/]|$))"
+      - "git +clean +-[a-zA-Z]*f"
+    content_exempt_paths:
+      - "(^|/)docs/"
+      - "^promise/checkpoints\\.yaml$"
+      - "^\\.dotclaude/checkpoints\\.yaml$"
+      - "(^|/)conformance/detect-hitl/"
+      - "(^|/)scripts/git-hooks/"
+      # The gate's own FP-regression battery holds dangerous-command strings as
+      # test DATA (like conformance/detect-hitl/), not executable ops.
+      - "(^|/)crates/dotclaude-core/tests/hitl_destructive_fp_probe\\.rs$"
