@@ -55,7 +55,7 @@ pub fn detect(
 ) -> Vec<Fired>;
 pub fn extract_acks(commit_msg: &str) -> Vec<Ack>;
 pub fn partition_ack<'a>(fired: &'a [Fired], acks: &[Ack]) -> (Vec<&'a Fired>, Vec<&'a Fired>);
-pub fn exit_class(fired_len: usize, unacked_len: usize) -> i32; // 0 | 2 (and 1 via caller)
+pub fn exit_class(fired_len: usize, unacked_len: usize) -> i32; // 0 | 1 | 2, self-contained
 pub fn extract_checkpoint_names(yaml_text: &str) -> Vec<String>;
 
 pub mod gitdiff {

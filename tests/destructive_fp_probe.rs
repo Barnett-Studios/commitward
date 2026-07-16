@@ -21,7 +21,9 @@ fn fires(compiled: &[CompiledCheckpoint], line: &str) -> bool {
 
 #[test]
 fn destructive_ops_fire_policy() {
-    let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+    // Module-local vendored corpus (byte-identical to the shipped checkpoints.yaml)
+    // so the test is self-contained once the module leaves the monorepo.
+    let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/corpus");
     let cps = load_checkpoints(&root.join("promise/checkpoints.yaml")).expect("load");
     let compiled = compile(cps).expect("compile");
 

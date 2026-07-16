@@ -35,7 +35,11 @@ if [ -e "$hook" ] && ! grep -q "$MARKER" "$hook" 2>/dev/null; then
     [ -e "$hook.pre-commitward" ] || cp "$hook" "$hook.pre-commitward"
 fi
 
-cat > "$hook" <<'HOOK'
+# Write atomically (temp file + mv) so an interrupted install can never leave a
+# half-written, unparseable hook — git would treat that as a blocking failure,
+# violating the fail-open guarantee.
+tmp="$(mktemp "$hooks_dir/.commit-msg.XXXXXX")"
+cat > "$tmp" <<'HOOK'
 #!/usr/bin/env bash
 # managed-by: commitward
 # commitward HITL commit-msg hook. Fail-open by design: any problem (missing
@@ -50,5 +54,6 @@ bin="$(command -v commitward 2>/dev/null || true)"
 [ "$?" = "2" ] && exit 2
 exit 0
 HOOK
-chmod +x "$hook"
+chmod +x "$tmp"
+mv "$tmp" "$hook"
 echo "commitward: installed commit-msg hook at $hook"

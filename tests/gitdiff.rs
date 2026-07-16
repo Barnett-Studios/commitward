@@ -13,7 +13,9 @@ fn name_status_parses_status_and_path() {
 
 #[test]
 fn name_status_rename_takes_new_path() {
-    // `git diff --name-status -M` renders renames as "R100\told\tnew"
+    // Parser-robustness only: the shipped CLI uses `--no-renames`, so it never
+    // emits an "R100\told\tnew" line. This asserts that IF fed one, the parser
+    // takes the new path — it does not imply the binary produces rename lines.
     let out = "R100\tsrc/old.rs\tsrc/new.rs\n";
     let v = parse_name_status(out);
     assert_eq!(v.len(), 1);

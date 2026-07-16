@@ -36,6 +36,10 @@ jobs:
         run: cargo test
       - name: hook installer test
         run: bash tests/install_hook_test.sh
+      - name: vendored registry matches shipped default
+        # The self-contained test corpus snapshot must not drift from the shipped
+        # baseline the CLI actually loads.
+        run: diff checkpoints.yaml tests/corpus/promise/checkpoints.yaml
   docker:
     name: docker-build-and-smoke
     runs-on: ubuntu-latest
