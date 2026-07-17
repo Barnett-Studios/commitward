@@ -1,6 +1,7 @@
-# Keep the build context small and stable: the image needs only the crate
-# sources + the default registry, not tests, CI, or docs.
-tests/
-.github/
 target/
+.git/
+.github/
+tests/
+docs/
 *.md
+dist/
