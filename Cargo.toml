@@ -5,6 +5,10 @@ edition = "2021"
 description = "Deterministic, fail-open human-sign-off (HITL) gate for high-stakes agentic commits"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/Barnett-Studios/commitward"
+rust-version = "1.94"
+readme = "README.md"
+keywords = ["git", "hook", "pre-commit", "hitl", "agent"]
+categories = ["command-line-utilities", "development-tools"]
 
 [lib]
 name = "commitward"
