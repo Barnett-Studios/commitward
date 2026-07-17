@@ -1,5 +1,10 @@
 # commitward
 
+[![CI](https://github.com/Barnett-Studios/commitward/actions/workflows/ci.yml/badge.svg)](https://github.com/Barnett-Studios/commitward/actions/workflows/ci.yml)
+[![Crates.io](https://img.shields.io/crates/v/commitward)](https://crates.io/crates/commitward)
+[![Downloads](https://img.shields.io/crates/d/commitward)](https://crates.io/crates/commitward)
+[![License](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](#license)
+
 **A deterministic, fail-open human-sign-off gate for high-stakes commits.**
 
 `commitward` matches a commit's diff against a checkpoint registry and blocks the commit
@@ -26,10 +31,11 @@ must sign off on a narrow set of high-stakes changes.
 The hook is fail-open and disables with `COMMITWARD_HITL=off`. If your repo uses a global
 `core.hooksPath`, the installer warns and tells you how to target that directory instead.
 
-**As a CLI (crates.io):**
+**As a CLI:**
 
 ```sh
-cargo install commitward
+brew tap Barnett-Studios/tap && brew install commitward   # macOS/Linux
+cargo install commitward                                   # any platform
 commitward --base origin/main --format markdown
 ```
 
@@ -100,3 +106,18 @@ exit **0** (nothing fired). Only exit 2 blocks.
 | `64` | usage error (bad flag / missing argument) |
 
 See [`CONTRACT.md`](CONTRACT.md) for the full interface and the fail-open guarantee.
+
+## License
+
+Licensed under either of [MIT](LICENSE-MIT) or [Apache-2.0](LICENSE-APACHE) at your option.
+Unless you explicitly state otherwise, any contribution you intentionally submit for
+inclusion in the work shall be dual-licensed as above, without any additional terms.
+
+---
+
+Built by [Barnett Studios](https://barnett-studios.com/) — part of the agentic-harness
+toolkit: [cxpak](https://github.com/Barnett-Studios/cxpak) ·
+**commitward** · [cascadr](https://github.com/Barnett-Studios/cascadr) ·
+[abproof](https://github.com/Barnett-Studios/abproof) ·
+[cordon](https://github.com/Barnett-Studios/cordon) ·
+[planner](https://github.com/Barnett-Studios/planner).
