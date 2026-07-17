@@ -79,10 +79,10 @@ checkpoints:\n\
 
 /// Stage a repo-local registry firing on danger.sh, add danger.sh, commit.
 fn add_guarded_change(dir: &Path) {
-    std::fs::create_dir_all(dir.join(".dotclaude")).unwrap();
-    std::fs::write(dir.join(".dotclaude/checkpoints.yaml"), REGISTRY).unwrap();
+    std::fs::create_dir_all(dir.join(".commitward")).unwrap();
+    std::fs::write(dir.join(".commitward/checkpoints.yaml"), REGISTRY).unwrap();
     std::fs::write(dir.join("danger.sh"), "echo hi\n").unwrap();
-    git(dir, &["add", "danger.sh", ".dotclaude/checkpoints.yaml"]);
+    git(dir, &["add", "danger.sh", ".commitward/checkpoints.yaml"]);
     assert!(
         git(dir, &["commit", "-m", "add danger"]).status.success(),
         "danger commit"
@@ -104,7 +104,7 @@ fn fires_exit_2_on_guarded_path_without_ack() {
             "--registry",
             "/nonexistent/global.yaml",
             "--repo-registry",
-            d.join(".dotclaude/checkpoints.yaml").to_str().unwrap(),
+            d.join(".commitward/checkpoints.yaml").to_str().unwrap(),
             "--commit-msg-file",
             msg.to_str().unwrap(),
         ],
@@ -167,7 +167,7 @@ fn ack_trailer_lifts_the_block_to_exit_1() {
             "--registry",
             "/nonexistent/global.yaml",
             "--repo-registry",
-            d.join(".dotclaude/checkpoints.yaml").to_str().unwrap(),
+            d.join(".commitward/checkpoints.yaml").to_str().unwrap(),
             "--commit-msg-file",
             msg.to_str().unwrap(),
         ],

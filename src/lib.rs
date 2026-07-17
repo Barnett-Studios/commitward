@@ -248,9 +248,8 @@ fn compile_one(cp: Checkpoint) -> Result<CompiledCheckpoint, CheckpointError> {
     })
 }
 
-/// Case-insensitive, unanchored regex. Inlined verbatim from the framework's
-/// `verify::patterns::compile_ci` — the sole intra-crate dependency of the
-/// original `detect_hitl` module, dropped on extraction (ADR-0050).
+/// Case-insensitive, unanchored regex — the compilation mode used for every
+/// checkpoint pattern.
 fn compile_ci(pat: &str) -> Result<regex::Regex, regex::Error> {
     regex::RegexBuilder::new(pat).case_insensitive(true).build()
 }

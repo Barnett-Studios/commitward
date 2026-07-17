@@ -27,7 +27,7 @@ OPTIONS:
     --commit-msg-file <path>  File holding the commit message to scan for HITL-ACK trailers
     --registry <path>         Global checkpoint baseline (default: $COMMITWARD_REGISTRY,
                               else checkpoints.yaml next to the binary)
-    --repo-registry <path>    Repo-local checkpoint overrides (default: .dotclaude/checkpoints.yaml)
+    --repo-registry <path>    Repo-local checkpoint overrides (default: .commitward/checkpoints.yaml)
     --format <text|json|markdown>   Output format (default: text)
     -h, --help                Print this help
 
@@ -132,7 +132,7 @@ fn run() -> i32 {
         }
     };
 
-    let repo_path = repo_registry.unwrap_or_else(|| repo_root.join(".dotclaude/checkpoints.yaml"));
+    let repo_path = repo_registry.unwrap_or_else(|| repo_root.join(".commitward/checkpoints.yaml"));
     let repo_cps = match load_checkpoints(&repo_path) {
         Ok(c) => c,
         Err(e) => {
@@ -175,7 +175,7 @@ fn run() -> i32 {
     let name_ref: &str = if cached { "HEAD" } else { base_ref.as_str() };
     let repo_rel = repo_path
         .strip_prefix(&repo_root)
-        .unwrap_or(Path::new(".dotclaude/checkpoints.yaml"));
+        .unwrap_or(Path::new(".commitward/checkpoints.yaml"));
     let base_names: Vec<String> = git_show(&repo_root, name_ref, &repo_rel.to_string_lossy())
         .map(|text| extract_checkpoint_names(&text))
         .unwrap_or_default()
@@ -253,7 +253,7 @@ fn git_diff_unified0(cwd: &Path, base: Option<&str>) -> std::io::Result<String> 
     run_git_diff(cwd, base, "--unified=0")
 }
 
-/// Shell `git diff` with the same flags the framework uses: `--no-renames`
+/// Shell `git diff` with the same flags commitward uses: `--no-renames`
 /// (renames surface as D+A so a guarded *old* path still fires) and
 /// `--diff-filter=ACDMRT`. `unknown/bad revision` degrades to empty output.
 fn run_git_diff(cwd: &Path, base: Option<&str>, mode: &str) -> std::io::Result<String> {

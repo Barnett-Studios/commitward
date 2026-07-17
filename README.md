@@ -62,7 +62,7 @@ use commitward::{compile, detect, exit_class, load_checkpoints, merge};
 A checkpoint fires on one of three modes: `paths` (regex over changed file paths),
 `content` (regex over *added* lines, with `content_exempt_paths`), or a code-driven
 `semantic` check. commitward ships a default global baseline; a repo adds or overrides
-checkpoints in `.dotclaude/checkpoints.yaml` (repo entries override global ones by name).
+checkpoints in `.commitward/checkpoints.yaml` (repo entries override global ones by name).
 
 ```yaml
 version: "1"
@@ -90,7 +90,7 @@ matching trailer:
 ```
 Refactor the gate registry
 
-HITL-ACK: gate-self-mod reviewed with the owner; see ADR-0010
+HITL-ACK: gate-self-mod reviewed with the owner
 ```
 
 An acknowledged fire returns exit **1** (fired, but allowed to proceed) — distinct from

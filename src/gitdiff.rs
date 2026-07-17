@@ -49,8 +49,8 @@ pub fn parse_name_status(out: &str) -> Vec<FileEntry> {
 
 /// Parse a unified diff into added lines grouped by destination file.
 ///
-/// Ported verbatim from the framework's `git::parse_added_lines` to preserve the
-/// gate's exact detection behavior — in particular its **hunk-state defense**: a
+/// Preserves the gate's exact detection behavior — in particular its
+/// **hunk-state defense**: a
 /// `+++ ` line is a file header only *before* the first `@@` hunk marker for a
 /// file; once inside a hunk, a `+++ `-prefixed line is captured as added content.
 /// This prevents an attacker from prepending a benign `++ note` line to neutralise

@@ -13,8 +13,7 @@ fail-open guarantee.
 > registry, git not present, unknown base ref, malformed diff — resolves to **exit 0**
 > (allow), emitting a diagnostic to stderr rather than failing silently.
 
-This is the same stance the reference framework's HITL gate holds (ADR-0009): correctness
-never depends on the gate being present or healthy.
+This is deliberate: correctness never depends on the gate being present or healthy.
 
 ## Front door 1 — CLI
 
@@ -28,7 +27,7 @@ commitward [OPTIONS]
 | `--cached` | off | diff the staged index against HEAD (used by the commit-msg hook) |
 | `--commit-msg-file <path>` | — | file holding the commit message to scan for `HITL-ACK:` trailers |
 | `--registry <path>` | `$COMMITWARD_REGISTRY`, else `checkpoints.yaml` beside the binary | global checkpoint baseline |
-| `--repo-registry <path>` | `.dotclaude/checkpoints.yaml` | repo-local overrides (override global by name) |
+| `--repo-registry <path>` | `.commitward/checkpoints.yaml` | repo-local overrides (override global by name) |
 | `--format <text\|json\|markdown>` | `text` | output format |
 | `-h`, `--help` | — | usage |
 
