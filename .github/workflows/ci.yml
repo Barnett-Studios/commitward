@@ -53,3 +53,15 @@ jobs:
         run: docker build -t commitward:ci . || docker build -t commitward:ci .
       - name: smoke
         run: docker run --rm commitward:ci --help | grep -qi usage
+      - name: smoke gate (envelope subcommand, network-free)
+        run: |
+          # A path checkpoint fires on a CLAUDE.md change with no HITL-ACK → exit_class 2 in the body
+          # (the process still exits 0 — the decision is data, not the exit code).
+          req='{"name_status":"M\tCLAUDE.md","commit_msg":"docs: x","global_registry_yaml":"version: \"1\"\ncheckpoints:\n  - name: cm\n    summary: s\n    paths:\n      - CLAUDE\n"}'
+          out="$(printf '%s' "$req" | docker run --rm -i --network none commitward:ci gate)"
+          echo "$out"
+          echo "$out" | grep -q '"status":"ok"'
+          echo "$out" | grep -q '"exit_class":2'
+          # A malformed request must surface the error sentinel, not a false clean pass.
+          err="$(echo 'nope' | docker run --rm -i --network none commitward:ci gate || true)"
+          echo "$err" | grep -q '"status":"error"'

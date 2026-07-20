@@ -107,6 +107,27 @@ exit **0** (nothing fired). Only exit 2 blocks.
 
 See [`CONTRACT.md`](CONTRACT.md) for the full interface and the fail-open guarantee.
 
+## Programmatic use — the `gate` envelope subcommand
+
+For consumption by another tool or from a container, `commitward gate` reads a JSON request on
+stdin and writes a `{schema_version, status, body}` response envelope on stdout — the diff and
+registries **inlined**, so it needs no git, no network, and no mounts:
+
+```console
+$ echo '{"name_status":"M\tCLAUDE.md","commit_msg":"docs: x",
+         "global_registry_yaml":"version: \"1\"\ncheckpoints:\n  - name: cm\n    summary: s\n    paths:\n      - CLAUDE\n"}' \
+    | docker run --rm -i --network none ghcr.io/barnett-studios/commitward gate
+{"schema_version":"1","status":"ok","body":{"fired":[{"name":"cm",...}],"unacked":["cm"],"exit_class":2}}
+```
+
+Request fields (all optional; evaluation fails open on absent inputs): `diff`, `name_status`
+(`git diff --name-status`), `commit_msg`, `global_registry_yaml`, `repo_registry_yaml`,
+`base_repo_registry_yaml` (for checkpoint-removed detection). The block **decision** is carried in
+`body.exit_class` (0 none fired · 1 fired-but-all-acked · 2 unacked fire), **not** the process exit
+code — the process exits 0 on any successful evaluation, so a consumer never mistakes a fired gate
+for a transport failure. A malformed request yields `status:"error"` + a non-zero exit. The native
+git-reading CLI above stays the path for commit-msg hooks and standalone use.
+
 ## License
 
 Licensed under either of [MIT](LICENSE-MIT) or [Apache-2.0](LICENSE-APACHE) at your option.

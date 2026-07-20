@@ -6,14 +6,16 @@
 //! gate never blocks on its own failure.
 
 use std::collections::HashSet;
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use commitward::gitdiff::{parse_added_lines, parse_name_status};
 use commitward::{
     compile, detect, exit_class, extract_acks, extract_checkpoint_names, load_checkpoints, merge,
-    partition_ack, FileEntry,
+    partition_ack, Checkpoint, FileEntry,
 };
+use serde::Deserialize;
 
 const USAGE: &str = "\
 commitward — deterministic fail-open HITL commit gate
@@ -36,11 +38,158 @@ EXIT CODES:
     2   at least one checkpoint fired and is unacknowledged (human sign-off required)
    64   usage error (bad flag / missing argument)
 
+SUBCOMMANDS:
+    gate    Read a JSON gate request on stdin (diff + registries inlined) and write an
+            ADR-0052 response envelope on stdout — for programmatic/container consumption
+            (network-free). The block decision is carried in body.exit_class, not the exit code.
+
 Disable entirely with COMMITWARD_HITL=off.";
 
 fn main() {
+    // The `gate` envelope subcommand (ADR-0052) is intercepted before flag parsing; every other
+    // invocation is the native git-reading CLI below.
+    if std::env::args().nth(1).as_deref() == Some("gate") {
+        std::process::exit(run_gate());
+    }
     let code = run();
     std::process::exit(code);
+}
+
+/// The `gate` envelope subcommand (ADR-0052): read a JSON request on stdin — the unified diff, the
+/// `git diff --name-status` output, the commit message, and the checkpoint registries inlined as
+/// YAML — evaluate the checkpoints, and write a `{schema_version, status, body}` envelope on stdout.
+///
+/// The gate DECISION is carried in `body.exit_class` (0 = pass / all-acked, 2 = unacked fire), NOT
+/// the process exit code: the process exits 0 on any successful evaluation, so a consumer's
+/// `ComponentInvoker` never mistakes a fired gate for a transport failure. Only an infrastructure
+/// error (unreadable stdin, malformed request) exits non-zero with a `status:"error"` envelope.
+///
+/// Fully self-contained: the diff and registries are inlined, so no git, no network, no mounts —
+/// safe under `docker run --network none`. The native `commitward` CLI (which shells `git` itself)
+/// stays the path for git hooks and standalone use.
+fn run_gate() -> i32 {
+    let mut input = String::new();
+    if let Err(e) = std::io::stdin().read_to_string(&mut input) {
+        println!("{}", error_envelope(&format!("failed to read stdin: {e}")));
+        return 1;
+    }
+    match gate_envelope(&input) {
+        Ok(out) => {
+            println!("{out}");
+            0
+        }
+        Err(e) => {
+            println!("{}", error_envelope(&e));
+            1
+        }
+    }
+}
+
+/// The `gate` request: everything commitward needs to evaluate, inlined (no git, no mounts). Every
+/// field is optional so a caller supplies only what it has; the evaluation fails open on absent
+/// inputs, mirroring the native CLI.
+#[derive(Deserialize)]
+struct GateRequest {
+    #[serde(default)]
+    diff: String,
+    #[serde(default)]
+    name_status: String,
+    #[serde(default)]
+    commit_msg: String,
+    #[serde(default)]
+    global_registry_yaml: Option<String>,
+    #[serde(default)]
+    repo_registry_yaml: Option<String>,
+    /// The repo registry as it stood at the base ref — enables checkpoint-removed detection.
+    #[serde(default)]
+    base_repo_registry_yaml: Option<String>,
+}
+
+fn gate_envelope(input: &str) -> Result<String, String> {
+    let req: GateRequest =
+        serde_json::from_str(input).map_err(|e| format!("invalid gate request JSON: {e}"))?;
+
+    // Inlined YAML → checkpoints. `load_checkpoints` takes a path, so materialize each registry to a
+    // self-cleaning temp file; an absent registry is an empty set (fail-open, mirrors the native CLI).
+    let global_cps = load_inlined_registry(req.global_registry_yaml.as_deref(), "global")?;
+    let repo_cps = load_inlined_registry(req.repo_registry_yaml.as_deref(), "repo")?;
+    let compiled =
+        compile(merge(global_cps, repo_cps)).map_err(|e| format!("registry compile error: {e}"))?;
+
+    let files = parse_name_status(&req.name_status);
+    let added = parse_added_lines(&req.diff);
+    let base_names: Option<Vec<String>> = req
+        .base_repo_registry_yaml
+        .as_ref()
+        .map(|y| extract_checkpoint_names(y));
+
+    let fired = detect(&compiled, &files, &added, base_names.as_deref());
+    let acks = extract_acks(&req.commit_msg);
+    let (_acked, unacked) = partition_ack(&fired, &acks);
+    let ec = exit_class(fired.len(), unacked.len());
+
+    let unacked_names: Vec<&str> = unacked.iter().map(|f| f.name.as_str()).collect();
+    let body = serde_json::json!({
+        "fired": &fired,
+        "unacked": unacked_names,
+        "exit_class": ec,
+    });
+    Ok(ok_envelope(body))
+}
+
+/// Load an inlined-YAML registry via a self-cleaning temp file. A parse error is fail-open (empty
+/// set, as the native CLI does); only a temp-file infrastructure error propagates.
+fn load_inlined_registry(yaml: Option<&str>, label: &str) -> Result<Vec<Checkpoint>, String> {
+    match yaml {
+        Some(y) => {
+            let tmp = write_temp_yaml(y, label)?;
+            Ok(load_checkpoints(&tmp.0).unwrap_or_default())
+        }
+        None => Ok(vec![]),
+    }
+}
+
+/// A temp file removed on drop (every path, including panic).
+struct TempYaml(PathBuf);
+impl Drop for TempYaml {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
+    }
+}
+
+/// Monotonic per-process counter so two `gate` calls in one process (or parallel tests) never
+/// collide on the temp filename despite sharing a pid.
+static TMP_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Write `content` to a uniquely-named temp file with `create_new` (O_EXCL) so a predictable path
+/// can never be made to follow a pre-existing symlink.
+fn write_temp_yaml(content: &str, label: &str) -> Result<TempYaml, String> {
+    use std::io::Write as _;
+    let seq = TMP_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let path = std::env::temp_dir().join(format!(
+        "commitward-gate-{label}-{}-{seq}.yaml",
+        std::process::id()
+    ));
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&path)
+        .map_err(|e| format!("create temp {label} registry: {e}"))?;
+    file.write_all(content.as_bytes())
+        .map_err(|e| format!("write temp {label} registry: {e}"))?;
+    Ok(TempYaml(path))
+}
+
+/// An `ok`-status ADR-0052 envelope wrapping a computed body.
+fn ok_envelope(body: serde_json::Value) -> String {
+    serde_json::json!({ "schema_version": "1", "status": "ok", "body": body }).to_string()
+}
+
+/// An `error`-status envelope — the ADR-0052 sentinel. A consumer treats `status != "ok"` as an
+/// infrastructure failure and falls back to its in-process path rather than trusting a result.
+fn error_envelope(message: &str) -> String {
+    serde_json::json!({ "schema_version": "1", "status": "error", "body": { "message": message } })
+        .to_string()
 }
 
 fn run() -> i32 {
@@ -360,5 +509,81 @@ fn print_markdown(
                 println!("  - Matched: `{m}`");
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod gate_tests {
+    use super::*;
+    use serde_json::{json, Value};
+
+    const REGISTRY: &str = r#"version: "1"
+checkpoints:
+  - name: touches-claude-md
+    summary: edits CLAUDE.md
+    paths:
+      - "(^|/)CLAUDE\\.md$"
+"#;
+
+    fn body_of(out: &str) -> Value {
+        let v: Value = serde_json::from_str(out).expect("gate output is JSON");
+        assert_eq!(v["schema_version"], "1");
+        assert_eq!(v["status"], "ok");
+        v["body"].clone()
+    }
+
+    #[test]
+    fn a_path_checkpoint_fires_and_is_unacked_by_default() {
+        let req = json!({
+            "name_status": "M\tCLAUDE.md",
+            "commit_msg": "docs: tweak CLAUDE.md",
+            "global_registry_yaml": REGISTRY,
+        })
+        .to_string();
+        let body = body_of(&gate_envelope(&req).unwrap());
+        // Decision is in the body; the process still exits 0 (checked at the CLI layer).
+        assert_eq!(body["exit_class"], 2, "an unacked fire blocks");
+        assert!(body["fired"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|f| f["name"] == "touches-claude-md"));
+        assert_eq!(body["unacked"], json!(["touches-claude-md"]));
+    }
+
+    #[test]
+    fn a_hitl_ack_trailer_clears_the_fire() {
+        let req = json!({
+            "name_status": "M\tCLAUDE.md",
+            "commit_msg": "docs: tweak CLAUDE.md\n\nHITL-ACK: touches-claude-md intentional",
+            "global_registry_yaml": REGISTRY,
+        })
+        .to_string();
+        let body = body_of(&gate_envelope(&req).unwrap());
+        // exit_class: 0 none fired · 1 fired-but-all-acked (proceed) · 2 unacked fire (block).
+        // An acked fire is informational (1), not a block — the commit proceeds.
+        assert_eq!(
+            body["exit_class"], 1,
+            "an acked fire is informational, not a block"
+        );
+        assert_eq!(body["unacked"], json!([]));
+    }
+
+    #[test]
+    fn an_unmatched_diff_does_not_fire() {
+        let req = json!({
+            "name_status": "M\tsrc/lib.rs",
+            "commit_msg": "feat: x",
+            "global_registry_yaml": REGISTRY,
+        })
+        .to_string();
+        let body = body_of(&gate_envelope(&req).unwrap());
+        assert_eq!(body["exit_class"], 0);
+        assert_eq!(body["fired"], json!([]));
+    }
+
+    #[test]
+    fn invalid_request_json_is_a_hard_error_not_a_false_clean_pass() {
+        assert!(gate_envelope("not json").is_err());
     }
 }
