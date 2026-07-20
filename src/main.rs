@@ -103,6 +103,11 @@ struct GateRequest {
     /// The repo registry as it stood at the base ref — enables checkpoint-removed detection.
     #[serde(default)]
     base_repo_registry_yaml: Option<String>,
+    /// The global registry as it stood at the base ref. Unioned with the repo base so a removed
+    /// checkpoint is detected whichever registry it lived in — matching the native CLI, which
+    /// unions base names from both `promise/checkpoints.yaml` and `.dotclaude/checkpoints.yaml`.
+    #[serde(default)]
+    base_global_registry_yaml: Option<String>,
 }
 
 fn gate_envelope(input: &str) -> Result<String, String> {
@@ -118,10 +123,22 @@ fn gate_envelope(input: &str) -> Result<String, String> {
 
     let files = parse_name_status(&req.name_status);
     let added = parse_added_lines(&req.diff);
-    let base_names: Option<Vec<String>> = req
-        .base_repo_registry_yaml
-        .as_ref()
-        .map(|y| extract_checkpoint_names(y));
+    // Union base checkpoint names from both the repo and global base registries, mirroring the
+    // native CLI (`local_base.union(&global_base)`). `None` only when neither was supplied.
+    let base_names: Option<Vec<String>> = match (&req.base_repo_registry_yaml, &req.base_global_registry_yaml)
+    {
+        (None, None) => None,
+        (repo, global) => {
+            let mut names: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+            if let Some(y) = repo {
+                names.extend(extract_checkpoint_names(y));
+            }
+            if let Some(y) = global {
+                names.extend(extract_checkpoint_names(y));
+            }
+            Some(names.into_iter().collect())
+        }
+    };
 
     let fired = detect(&compiled, &files, &added, base_names.as_deref());
     let acks = extract_acks(&req.commit_msg);
@@ -585,5 +602,32 @@ checkpoints:
     #[test]
     fn invalid_request_json_is_a_hard_error_not_a_false_clean_pass() {
         assert!(gate_envelope("not json").is_err());
+    }
+
+    #[test]
+    fn a_removed_checkpoint_is_detected_through_the_global_base() {
+        // The checkpoint_removed guard fires when a base checkpoint name is absent from the
+        // current registry and a checkpoints.yaml is touched. Supplying the removed name ONLY via
+        // base_global_registry_yaml must still fire it, proving the global base is unioned in — the
+        // native CLI unions base names from both promise/checkpoints.yaml and .dotclaude/.
+        let current = "version: \"1\"\ncheckpoints:\n  - name: guard-removed\n    summary: Detect removed checkpoints\n    semantic: checkpoint_removed\n";
+        let base_global = "version: \"1\"\ncheckpoints:\n  - name: guard-removed\n    summary: Detect removed checkpoints\n    semantic: checkpoint_removed\n  - name: old-global-guard\n    summary: An old global path guard\n    paths:\n      - \"(^|/)secrets$\"\n";
+        let req = json!({
+            "name_status": "M\tpromise/checkpoints.yaml",
+            "commit_msg": "chore: edit registry",
+            "global_registry_yaml": current,
+            "base_global_registry_yaml": base_global,
+        })
+        .to_string();
+        let body = body_of(&gate_envelope(&req).unwrap());
+        assert!(
+            body["fired"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|f| f["name"] == "guard-removed"),
+            "checkpoint_removed guard should fire on a global-base removal: {body}"
+        );
+        assert_eq!(body["exit_class"], 2, "an unacked removed-checkpoint blocks");
     }
 }
