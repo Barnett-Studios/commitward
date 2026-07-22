@@ -125,20 +125,21 @@ fn gate_envelope(input: &str) -> Result<String, String> {
     let added = parse_added_lines(&req.diff);
     // Union base checkpoint names from both the repo and global base registries, mirroring the
     // native CLI (`local_base.union(&global_base)`). `None` only when neither was supplied.
-    let base_names: Option<Vec<String>> = match (&req.base_repo_registry_yaml, &req.base_global_registry_yaml)
-    {
-        (None, None) => None,
-        (repo, global) => {
-            let mut names: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
-            if let Some(y) = repo {
-                names.extend(extract_checkpoint_names(y));
+    let base_names: Option<Vec<String>> =
+        match (&req.base_repo_registry_yaml, &req.base_global_registry_yaml) {
+            (None, None) => None,
+            (repo, global) => {
+                let mut names: std::collections::BTreeSet<String> =
+                    std::collections::BTreeSet::new();
+                if let Some(y) = repo {
+                    names.extend(extract_checkpoint_names(y));
+                }
+                if let Some(y) = global {
+                    names.extend(extract_checkpoint_names(y));
+                }
+                Some(names.into_iter().collect())
             }
-            if let Some(y) = global {
-                names.extend(extract_checkpoint_names(y));
-            }
-            Some(names.into_iter().collect())
-        }
-    };
+        };
 
     let fired = detect(&compiled, &files, &added, base_names.as_deref());
     let acks = extract_acks(&req.commit_msg);
@@ -628,6 +629,9 @@ checkpoints:
                 .any(|f| f["name"] == "guard-removed"),
             "checkpoint_removed guard should fire on a global-base removal: {body}"
         );
-        assert_eq!(body["exit_class"], 2, "an unacked removed-checkpoint blocks");
+        assert_eq!(
+            body["exit_class"], 2,
+            "an unacked removed-checkpoint blocks"
+        );
     }
 }
