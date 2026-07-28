@@ -6,6 +6,37 @@ checkpoints:
       - "(^|/)CLAUDE\\.md$"
       - "(^|/)AGENTS\\.md$"
       - "(^|/)rules/.*\\.md$"
+  - name: gate-self-mod
+    summary: "Modifying the gate itself — its registry, or the hook that invokes it"
+    # NF2 (commitward#7). Without this, an agent can delete a checkpoint and use the
+    # thing that checkpoint guarded in the SAME commit, and nothing fires: the deleted
+    # checkpoint cannot fire, and no other checkpoint watches the registry.
+    #
+    # These are the paths *commitward itself* resolves — the default registry beside the
+    # executable, the repo-local override (`main.rs`), and the installed commit-msg hook,
+    # which is the quieter way to disable the gate. A registry pointed at by
+    # COMMITWARD_REGISTRY cannot be matched by a static pattern; add its path here if you
+    # use that variable.
+    #
+    # `(^|/)checkpoints\.yaml$` deliberately matches at any depth, so a registry vendored
+    # under a subdirectory (or a test fixture registry) is guarded too. It fires — it does
+    # not block; a deliberate change is acknowledged with a HITL-ACK line.
+    paths:
+      - "(^|/)checkpoints\\.yaml$"
+      - "(^|/)\\.commitward/checkpoints\\.yaml$"
+      - "(^|/)\\.git-hooks/commit-msg$"
+      - "(^|/)\\.git/hooks/commit-msg$"
+      - "(^|/)install-hook\\.sh$"
+  - name: checkpoint-removed
+    summary: "A checkpoint was removed from a registry (the gate was weakened)"
+    # The semantic counterpart to gate-self-mod: that one fires on *touching* a registry,
+    # this one on a checkpoint present at the base ref being absent now. Two independent
+    # guards on the same act, so neither is a single point of failure.
+    #
+    # Requires the caller to supply base checkpoint names (`--base`, or the base registry
+    # in a `gate` request). Without them this cannot fire — which is why an absent base is
+    # now reported as a warning rather than passing silently (NF3).
+    semantic: checkpoint_removed
   - name: destructive-ops
     summary: "Destructive git/filesystem command entering a committed file"
     content:
