@@ -146,22 +146,55 @@ fn gate_envelope(input: &str) -> Result<String, String> {
     let (_acked, unacked) = partition_ack(&fired, &acks);
     let ec = exit_class(fired.len(), unacked.len());
 
+    // NF3: name every guard that could not run. A clean `exit_class: 0` means "nothing
+    // fired", which a consumer reads as "nothing to worry about" — so the result has to
+    // say which checks were not performed, or the two are indistinguishable.
+    let mut warnings: Vec<String> = Vec::new();
+    if compiled.is_empty() {
+        warnings.push(
+            "no checkpoints were supplied (global_registry_yaml / repo_registry_yaml both \
+             absent or empty) — every commit passes this gate"
+                .to_string(),
+        );
+    }
+    if base_names.is_none() {
+        warnings.push(
+            "no base registry supplied (base_repo_registry_yaml / base_global_registry_yaml) \
+             — the checkpoint-removed guard is INACTIVE for this call, so a checkpoint \
+             deleted in this change will not be detected"
+                .to_string(),
+        );
+    }
+
     let unacked_names: Vec<&str> = unacked.iter().map(|f| f.name.as_str()).collect();
     let body = serde_json::json!({
         "fired": &fired,
         "unacked": unacked_names,
         "exit_class": ec,
+        "warnings": warnings,
     });
     Ok(ok_envelope(body))
 }
 
-/// Load an inlined-YAML registry via a self-cleaning temp file. A parse error is fail-open (empty
-/// set, as the native CLI does); only a temp-file infrastructure error propagates.
+/// Load an inlined-YAML registry via a self-cleaning temp file.
+///
+/// A parse error **propagates** (NF3, commitward#7). It used to be swallowed into an empty
+/// checkpoint set, which meant a malformed registry produced a clean, `status: "ok"` pass —
+/// a security control reporting success precisely when it could not run. That is the
+/// fail-*silent* direction, and it is the one failure mode a gate must never have.
+///
+/// The caller turns this into an `error` envelope, which ADR-0052 defines as "do not trust
+/// this result, fall back to your in-process path". The system still fails open overall —
+/// commitward is not a blocking control — but it now does so audibly at both layers instead
+/// of silently at one.
+///
+/// An **absent** registry is still an empty set: supplying nothing is a configuration
+/// choice, supplying something unparseable is a defect.
 fn load_inlined_registry(yaml: Option<&str>, label: &str) -> Result<Vec<Checkpoint>, String> {
     match yaml {
         Some(y) => {
             let tmp = write_temp_yaml(y, label)?;
-            Ok(load_checkpoints(&tmp.0).unwrap_or_default())
+            load_checkpoints(&tmp.0).map_err(|e| format!("{label} registry failed to parse: {e}"))
         }
         None => Ok(vec![]),
     }

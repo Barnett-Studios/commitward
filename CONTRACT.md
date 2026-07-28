@@ -15,6 +15,23 @@ fail-open guarantee.
 
 This is deliberate: correctness never depends on the gate being present or healthy.
 
+**Fail-open is not fail-silent.** A gate that cannot evaluate must say so; a check that did not run
+must never be reported as a check that passed. Concretely (commitward#7):
+
+- The **CLI** keeps exit 0 on a malformed registry, with a stderr diagnostic — unchanged.
+- The **`gate` envelope** returns `status: "error"` and a non-zero exit when a *supplied* registry
+  will not parse. Under ADR-0052 that tells the consumer "do not trust this result, fall back to
+  your in-process path", so the system still fails open — audibly at both layers rather than
+  silently at one. An **absent** registry remains an empty set: supplying nothing is a
+  configuration choice, supplying something unparseable is a defect.
+- Every `ok` envelope carries `body.warnings`, naming the guards that could not run.
+
+**The default registry protects itself.** The shipped `checkpoints.yaml` carries `gate-self-mod`
+(path) and `checkpoint-removed` (semantic), so removing a checkpoint and exercising what it guarded
+in the same commit fires two independent guards rather than nothing. This is still an honest-operator
+control, not an adversarial one — the acknowledgement protocol below is self-acknowledgeable by the
+committing agent, by design.
+
 ## Front door 1 — CLI
 
 ```
@@ -28,6 +45,10 @@ commitward [OPTIONS]
 | `--commit-msg-file <path>` | — | file holding the commit message to scan for `HITL-ACK:` trailers |
 | `--registry <path>` | `$COMMITWARD_REGISTRY`, else `checkpoints.yaml` beside the binary | global checkpoint baseline |
 | `--repo-registry <path>` | `.commitward/checkpoints.yaml` | repo-local overrides (override global by name) |
+
+Both registry paths, plus the installed `commit-msg` hook and `install-hook.sh`, are guarded by the
+default `gate-self-mod` checkpoint. A registry located via `$COMMITWARD_REGISTRY` cannot be matched
+by a static pattern — add its path to `gate-self-mod` yourself if you use that variable.
 | `--format <text\|json\|markdown>` | `text` | output format |
 | `-h`, `--help` | — | usage |
 
