@@ -179,3 +179,79 @@ fn ack_trailer_lifts_the_block_to_exit_1() {
         String::from_utf8_lossy(&out.stderr)
     );
 }
+
+/// NF2, driven through the **real CLI** against the **shipped** registry (commitward#7).
+///
+/// `default_registry.rs` proves the same scenario at the engine layer (`detect(&compiled, …)`).
+/// That validates the logic but not the wrapper a consumer actually runs: argument parsing,
+/// registry resolution, base-ref diffing and the exit-code contract all sit in `main::run`, and
+/// none of them were on the NF2 path. Review on #8 asked for that seam to be closed.
+///
+/// The scenario: an agent removes `destructive-ops` from the repo-local registry AND introduces a
+/// dangerous recursive-force removal, in ONE commit. `destructive-ops` cannot fire — it no longer
+/// exists — so the only thing between this and a clean gate is the registry's self-protection.
+#[test]
+fn nf2_registry_weakening_fires_through_the_real_cli() {
+    let (repo, base) = setup("nf2-cli");
+    let d = &repo.dir;
+
+    // Base commit: the shipped default registry, copied in as the repo-local one so this
+    // exercises the real file rather than a fixture written for the test.
+    let shipped = std::fs::read_to_string(
+        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("checkpoints.yaml"),
+    )
+    .expect("the shipped default registry must be readable");
+    std::fs::create_dir_all(d.join(".commitward")).unwrap();
+    std::fs::write(d.join(".commitward/checkpoints.yaml"), &shipped).unwrap();
+    git(d, &["add", ".commitward/checkpoints.yaml"]);
+    assert!(
+        git(d, &["commit", "-m", "adopt the default registry"])
+            .status
+            .success(),
+        "registry commit"
+    );
+    let base_with_registry = rev_parse_head(d);
+    let _ = base;
+
+    // The attack, in one commit: delete the guard, use what it guarded.
+    let weakened: String = shipped
+        .lines()
+        .scan(false, |skipping, line| {
+            if line.starts_with("  - name: ") {
+                *skipping = line.contains("destructive-ops");
+            }
+            Some(if *skipping { None } else { Some(line) })
+        })
+        .flatten()
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        !weakened.contains("destructive-ops"),
+        "the test must actually remove the checkpoint it claims to"
+    );
+    std::fs::write(
+        d.join(".commitward/checkpoints.yaml"),
+        format!("{weakened}\n"),
+    )
+    .unwrap();
+    std::fs::write(d.join("cleanup.sh"), "rm -rf / --no-preserve-root\n").unwrap();
+    git(d, &["add", ".commitward/checkpoints.yaml", "cleanup.sh"]);
+    assert!(
+        git(d, &["commit", "-m", "tidy up"]).status.success(),
+        "attack commit"
+    );
+
+    let out = commitward(d, &["--base", &base_with_registry, "--format", "json"]);
+    let code = out.status.code().unwrap_or(-1);
+    let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+
+    assert_eq!(
+        code, 2,
+        "removing a guard and using what it guarded, in one commit, must reach a human — \
+         got exit {code}; stdout:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("gate-self-mod") || stdout.contains("checkpoint-removed"),
+        "the fire must name a self-protection checkpoint; stdout:\n{stdout}"
+    );
+}

@@ -26,11 +26,20 @@ must never be reported as a check that passed. Concretely (commitward#7):
   configuration choice, supplying something unparseable is a defect.
 - Every `ok` envelope carries `body.warnings`, naming the guards that could not run.
 
-**The default registry protects itself.** The shipped `checkpoints.yaml` carries `gate-self-mod`
-(path) and `checkpoint-removed` (semantic), so removing a checkpoint and exercising what it guarded
-in the same commit fires two independent guards rather than nothing. This is still an honest-operator
-control, not an adversarial one — the acknowledgement protocol below is self-acknowledgeable by the
-committing agent, by design.
+**The default registry carries self-protection, with a documented residual.** The shipped
+`checkpoints.yaml` carries `gate-self-mod` (path) and `checkpoint-removed` (semantic), so removing
+*a* checkpoint and exercising what it guarded in the same commit fires two independent guards rather
+than nothing.
+
+It does **not** survive removal of the guards themselves. `checkpoint-removed` needs base checkpoint
+names to compare against, so with no base registry it cannot fire at all (commitward#4); and a commit
+that deletes the guarding entries leaves nothing watching the registry — `lib.rs`'s
+`residual_gap_adr0010_checkpoint_removed_itself_removed` pins exactly that. A registry cannot be the
+sole thing that protects the registry; closing it needs an out-of-band anchor the on-disk file cannot
+delete — a compiled-in minimum set, or a loudly-enforced base-registry requirement (commitward#9).
+
+This remains an honest-operator control, not an adversarial one — the acknowledgement protocol below
+is self-acknowledgeable by the committing agent, by design.
 
 ## Front door 1 — CLI
 
