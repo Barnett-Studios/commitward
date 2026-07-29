@@ -106,11 +106,15 @@ fn an_empty_checkpoint_set_warns_that_everything_passes() {
 
     let (_code, env) = gate(&request);
     let warnings = env["body"]["warnings"].as_array().expect("warnings array");
+    // The claim narrowed with commitward#9 — the compiled-in anchor still applies when no
+    // registry was supplied, so "every commit passes" would now be false. What must not
+    // change is that supplying nothing is reported as a configuration hole rather than
+    // read as a clean pass.
     assert!(
-        warnings.iter().any(|w| w
-            .as_str()
-            .unwrap_or_default()
-            .contains("every commit passes")),
+        warnings.iter().any(|w| {
+            let s = w.as_str().unwrap_or_default();
+            s.contains("no checkpoints were supplied") && s.contains("passes")
+        }),
         "no registry at all is the loudest silent pass there is; got {warnings:?}"
     );
 }

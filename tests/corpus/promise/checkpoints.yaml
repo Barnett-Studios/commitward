@@ -10,7 +10,14 @@ checkpoints:
     summary: "Modifying the gate itself — its registry, or the hook that invokes it"
     # NF2 (commitward#7). Without this, an agent can delete a checkpoint and use the
     # thing that checkpoint guarded in the SAME commit, and nothing fires: the deleted
-    # checkpoint cannot fire, and no other checkpoint watches the registry.
+    # checkpoint cannot fire, and no other checkpoint in this file watches the registry.
+    #
+    # This entry is still removable — it lives in the file it guards. That leg is covered
+    # by `anchor-gate-integrity`, compiled into the binary and merged into every registry
+    # by `compile()` (commitward#9), which watches these same paths and cannot be deleted
+    # by editing YAML. Keep this one anyway: a repo that narrows or widens the on-disk
+    # version stays in control of its own policy, and two independent guards on the same
+    # act means neither is a single point of failure.
     #
     # These are the paths *commitward itself* resolves — the default registry beside the
     # executable, the repo-local override (`main.rs`), and the installed commit-msg hook,

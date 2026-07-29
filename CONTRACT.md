@@ -31,12 +31,26 @@ must never be reported as a check that passed. Concretely (commitward#7):
 *a* checkpoint and exercising what it guarded in the same commit fires two independent guards rather
 than nothing.
 
-It does **not** survive removal of the guards themselves. `checkpoint-removed` needs base checkpoint
-names to compare against, so with no base registry it cannot fire at all (commitward#4); and a commit
-that deletes the guarding entries leaves nothing watching the registry — `lib.rs`'s
-`residual_gap_adr0010_checkpoint_removed_itself_removed` pins exactly that. A registry cannot be the
-sole thing that protects the registry; closing it needs an out-of-band anchor the on-disk file cannot
-delete — a compiled-in minimum set, or a loudly-enforced base-registry requirement (commitward#9).
+Those two entries do not survive removal of themselves — they live in the file they guard, and
+`checkpoint-removed` additionally needs base checkpoint names, so with no base registry it cannot
+fire at all (commitward#4). A registry cannot be the sole thing that protects the registry.
+
+**So one checkpoint is not in the registry.** `compile()` merges `anchor_checkpoints()` —
+`anchor-gate-integrity`, compiled into the binary — into *every* registry, including an empty one,
+and applies it last so a same-named on-disk entry cannot shadow it. It watches the gate's own files
+(`checkpoints.yaml` at any depth, `.commitward/checkpoints.yaml`, the commit-msg hook,
+`install-hook.sh`). There is no edit to a YAML file that removes it, and no registry at all is still
+not an unguarded gate.
+
+Consequences worth stating: a commit that touches a registry or the hook now **always** fires at
+least one checkpoint, including the commit that first adopts a registry — acknowledge it with a
+`HITL-ACK` line like any other. And the anchor is deliberately narrow: it covers the gate's own
+integrity, not policy. An anchor that grew to cover policy would be a second registry that no repo
+could declare or amend, which is the thing this design exists to avoid.
+
+Still open: `residual_gap_adr0010_checkpoint_removed_itself_removed` — a removed
+`checkpoint_removed` entry still produces no *semantic* fire. The anchor covers the act (the file
+changed), not the semantics of what was removed from it.
 
 This remains an honest-operator control, not an adversarial one — the acknowledgement protocol below
 is self-acknowledgeable by the committing agent, by design.

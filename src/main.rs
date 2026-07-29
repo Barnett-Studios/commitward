@@ -118,6 +118,10 @@ fn gate_envelope(input: &str) -> Result<String, String> {
     // self-cleaning temp file; an absent registry is an empty set (fail-open, mirrors the native CLI).
     let global_cps = load_inlined_registry(req.global_registry_yaml.as_deref(), "global")?;
     let repo_cps = load_inlined_registry(req.repo_registry_yaml.as_deref(), "repo")?;
+    // Asked *before* compile, which now always adds the compiled-in anchor (commitward#9).
+    // The NF3 warning below is about what the caller supplied — "you configured nothing" is
+    // still true and still worth saying when the only thing standing is the anchor.
+    let no_registry_supplied = global_cps.is_empty() && repo_cps.is_empty();
     let compiled =
         compile(merge(global_cps, repo_cps)).map_err(|e| format!("registry compile error: {e}"))?;
 
@@ -150,10 +154,11 @@ fn gate_envelope(input: &str) -> Result<String, String> {
     // fired", which a consumer reads as "nothing to worry about" — so the result has to
     // say which checks were not performed, or the two are indistinguishable.
     let mut warnings: Vec<String> = Vec::new();
-    if compiled.is_empty() {
+    if no_registry_supplied {
         warnings.push(
             "no checkpoints were supplied (global_registry_yaml / repo_registry_yaml both \
-             absent or empty) — every commit passes this gate"
+             absent or empty) — only the compiled-in gate-integrity anchor applies, so every \
+             commit that does not touch the gate's own files passes"
                 .to_string(),
         );
     }
