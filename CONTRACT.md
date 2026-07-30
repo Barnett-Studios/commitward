@@ -15,6 +15,46 @@ fail-open guarantee.
 
 This is deliberate: correctness never depends on the gate being present or healthy.
 
+**Fail-open is not fail-silent.** A gate that cannot evaluate must say so; a check that did not run
+must never be reported as a check that passed. Concretely (commitward#7):
+
+- The **CLI** keeps exit 0 on a malformed registry, with a stderr diagnostic — unchanged.
+- The **`gate` envelope** returns `status: "error"` and a non-zero exit when a *supplied* registry
+  will not parse. Under ADR-0052 that tells the consumer "do not trust this result, fall back to
+  your in-process path", so the system still fails open — audibly at both layers rather than
+  silently at one. An **absent** registry remains an empty set: supplying nothing is a
+  configuration choice, supplying something unparseable is a defect.
+- Every `ok` envelope carries `body.warnings`, naming the guards that could not run.
+
+**The default registry carries self-protection, with a documented residual.** The shipped
+`checkpoints.yaml` carries `gate-self-mod` (path) and `checkpoint-removed` (semantic), so removing
+*a* checkpoint and exercising what it guarded in the same commit fires two independent guards rather
+than nothing.
+
+Those two entries do not survive removal of themselves — they live in the file they guard, and
+`checkpoint-removed` additionally needs base checkpoint names, so with no base registry it cannot
+fire at all (commitward#4). A registry cannot be the sole thing that protects the registry.
+
+**So one checkpoint is not in the registry.** `compile()` merges `anchor_checkpoints()` —
+`anchor-gate-integrity`, compiled into the binary — into *every* registry, including an empty one,
+and applies it last so a same-named on-disk entry cannot shadow it. It watches the gate's own files
+(`checkpoints.yaml` at any depth, `.commitward/checkpoints.yaml`, the commit-msg hook,
+`install-hook.sh`). There is no edit to a YAML file that removes it, and no registry at all is still
+not an unguarded gate.
+
+Consequences worth stating: a commit that touches a registry or the hook now **always** fires at
+least one checkpoint, including the commit that first adopts a registry — acknowledge it with a
+`HITL-ACK` line like any other. And the anchor is deliberately narrow: it covers the gate's own
+integrity, not policy. An anchor that grew to cover policy would be a second registry that no repo
+could declare or amend, which is the thing this design exists to avoid.
+
+Still open: `residual_gap_adr0010_checkpoint_removed_itself_removed` — a removed
+`checkpoint_removed` entry still produces no *semantic* fire. The anchor covers the act (the file
+changed), not the semantics of what was removed from it.
+
+This remains an honest-operator control, not an adversarial one — the acknowledgement protocol below
+is self-acknowledgeable by the committing agent, by design.
+
 ## Front door 1 — CLI
 
 ```
@@ -28,6 +68,10 @@ commitward [OPTIONS]
 | `--commit-msg-file <path>` | — | file holding the commit message to scan for `HITL-ACK:` trailers |
 | `--registry <path>` | `$COMMITWARD_REGISTRY`, else `checkpoints.yaml` beside the binary | global checkpoint baseline |
 | `--repo-registry <path>` | `.commitward/checkpoints.yaml` | repo-local overrides (override global by name) |
+
+Both registry paths, plus the installed `commit-msg` hook and `install-hook.sh`, are guarded by the
+default `gate-self-mod` checkpoint. A registry located via `$COMMITWARD_REGISTRY` cannot be matched
+by a static pattern — add its path to `gate-self-mod` yourself if you use that variable.
 | `--format <text\|json\|markdown>` | `text` | output format |
 | `-h`, `--help` | — | usage |
 

@@ -205,13 +205,59 @@ pub fn merge(global: Vec<Checkpoint>, repo: Vec<Checkpoint>) -> Vec<Checkpoint> 
     out
 }
 
+/// The out-of-band anchor: checkpoints [`compile`] applies no matter what the on-disk
+/// registry says (commitward#9).
+///
+/// The registry cannot be the sole protector of the registry. `gate-self-mod` and
+/// `checkpoint-removed` ship in the default registry, which means deleting the registry
+/// deletes its own guard **in the same act** — and `checkpoint-removed` cannot fire at all
+/// without a base registry to compare against (commitward#4). A single commit that dropped
+/// the whole file therefore fired nothing, and the shipped `checkpoints.yaml` said so in
+/// its own comments.
+///
+/// So this one lives in the binary. There is no edit to a YAML file that removes it, and
+/// no name a registry can declare that shadows it — [`compile`] applies the anchor *after*
+/// the user's entries, so a same-named entry loses.
+///
+/// Deliberately minimal: one path checkpoint over the registry and hook files themselves.
+/// An anchor that grew to cover policy would be a second, undeclarable registry — the
+/// thing this codebase exists to avoid. Everything else stays editable, on disk, where a
+/// repo can see and change it.
+pub fn anchor_checkpoints() -> Vec<Checkpoint> {
+    vec![Checkpoint {
+        name: "anchor-gate-integrity".to_string(),
+        summary: "the commit gate's own registry or hook changed — compiled-in anchor, not \
+                  removable by editing a registry"
+            .to_string(),
+        standards_doc: None,
+        paths: vec![
+            r"(^|/)\.commitward/checkpoints\.yaml$".to_string(),
+            r"(^|/)checkpoints\.yaml$".to_string(),
+            r"(^|/)\.git-hooks/commit-msg$".to_string(),
+            r"(^|/)\.git/hooks/commit-msg$".to_string(),
+            r"(^|/)install-hook\.sh$".to_string(),
+        ],
+        content: vec![],
+        content_exempt_paths: vec![],
+        semantic: None,
+    }]
+}
+
 /// Compile raw checkpoints into their matched representations.
 ///
 /// Each checkpoint must declare exactly one of `paths`, `content`, or
 /// `semantic`; mixed declarations produce `Err(AmbiguousMode)`. All regex
 /// patterns are compiled through the private `compile_ci` helper (case-insensitive).
+///
+/// [`anchor_checkpoints`] is merged in last, so **every** compiled registry — including an
+/// empty one — carries the anchor. Placing it here rather than at the call sites is the
+/// point: a consumer cannot obtain a compiled registry without it, so the floor does not
+/// depend on each caller remembering to add it.
 pub fn compile(cps: Vec<Checkpoint>) -> Result<Vec<CompiledCheckpoint>, CheckpointError> {
-    cps.into_iter().map(compile_one).collect()
+    merge(cps, anchor_checkpoints())
+        .into_iter()
+        .map(compile_one)
+        .collect()
 }
 
 fn compile_one(cp: Checkpoint) -> Result<CompiledCheckpoint, CheckpointError> {
@@ -775,8 +821,13 @@ checkpoints:
         // ADR-0010 known limitation: when the `checkpoint_removed`-semantic entry
         // is itself removed from the registry, no SemanticKind::CheckpointRemoved
         // checkpoint remains in the compiled set to trigger detection. Consequently
-        // no `checkpoint-removed` Fired is produced. Path-based `gate-self-mod`
-        // (guarding checkpoints.yaml) is the practical backstop for this scenario.
+        // no `checkpoint-removed` Fired is produced.
+        //
+        // Still true, and no longer the end of the story: the backstop used to be
+        // `gate-self-mod`, which lives in the same removable file. It is now
+        // `anchor-gate-integrity`, compiled into the binary (commitward#9) — this test's
+        // `files` deliberately do not include a registry path, which is why nothing fires
+        // here and the semantic gap stays visible rather than being masked by the anchor.
         let base_names = vec![
             "guard-a".to_string(),
             "guard-b".to_string(),

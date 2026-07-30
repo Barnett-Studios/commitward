@@ -158,7 +158,15 @@ fn ack_trailer_lifts_the_block_to_exit_1() {
     let d = &repo.dir;
     add_guarded_change(d);
     let msg = d.join("msg.txt");
-    std::fs::write(&msg, "add danger\n\nHITL-ACK: danger-file smoke test\n").unwrap();
+    // Two fires now, not one: `add_guarded_change` commits `.commitward/checkpoints.yaml`,
+    // and the compiled-in anchor watches the gate's own files (commitward#9). Both must be
+    // acked for the block to lift — which is the contract, "a *matching* ack per fire".
+    std::fs::write(
+        &msg,
+        "add danger\n\nHITL-ACK: danger-file smoke test\n\
+         HITL-ACK: anchor-gate-integrity adopting a registry is a gate change\n",
+    )
+    .unwrap();
     let out = commitward(
         d,
         &[
@@ -177,5 +185,184 @@ fn ack_trailer_lifts_the_block_to_exit_1() {
         Some(1),
         "a matching HITL-ACK trailer must lift the block (fired+acked -> exit 1, not 2); stderr: {}",
         String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+/// NF2, driven through the **real CLI** against the **shipped** registry (commitward#7).
+///
+/// `default_registry.rs` proves the same scenario at the engine layer (`detect(&compiled, …)`).
+/// That validates the logic but not the wrapper a consumer actually runs: argument parsing,
+/// registry resolution, base-ref diffing and the exit-code contract all sit in `main::run`, and
+/// none of them were on the NF2 path. Review on #8 asked for that seam to be closed.
+///
+/// The scenario: an agent removes `destructive-ops` from the repo-local registry AND introduces a
+/// dangerous recursive-force removal, in ONE commit. `destructive-ops` cannot fire — it no longer
+/// exists — so the only thing between this and a clean gate is the registry's self-protection.
+#[test]
+fn nf2_registry_weakening_fires_through_the_real_cli() {
+    let (repo, base) = setup("nf2-cli");
+    let d = &repo.dir;
+
+    // Base commit: the shipped default registry, copied in as the repo-local one so this
+    // exercises the real file rather than a fixture written for the test.
+    let shipped = std::fs::read_to_string(
+        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("checkpoints.yaml"),
+    )
+    .expect("the shipped default registry must be readable");
+    std::fs::create_dir_all(d.join(".commitward")).unwrap();
+    std::fs::write(d.join(".commitward/checkpoints.yaml"), &shipped).unwrap();
+    git(d, &["add", ".commitward/checkpoints.yaml"]);
+    assert!(
+        git(d, &["commit", "-m", "adopt the default registry"])
+            .status
+            .success(),
+        "registry commit"
+    );
+    let base_with_registry = rev_parse_head(d);
+    let _ = base;
+
+    // The attack, in one commit: delete the guard, use what it guarded.
+    let weakened: String = shipped
+        .lines()
+        .scan(false, |skipping, line| {
+            if line.starts_with("  - name: ") {
+                *skipping = line.contains("destructive-ops");
+            }
+            Some(if *skipping { None } else { Some(line) })
+        })
+        .flatten()
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        !weakened.contains("destructive-ops"),
+        "the test must actually remove the checkpoint it claims to"
+    );
+    std::fs::write(
+        d.join(".commitward/checkpoints.yaml"),
+        format!("{weakened}\n"),
+    )
+    .unwrap();
+    std::fs::write(d.join("cleanup.sh"), "rm -rf / --no-preserve-root\n").unwrap();
+    git(d, &["add", ".commitward/checkpoints.yaml", "cleanup.sh"]);
+    assert!(
+        git(d, &["commit", "-m", "tidy up"]).status.success(),
+        "attack commit"
+    );
+
+    let out = commitward(d, &["--base", &base_with_registry, "--format", "json"]);
+    let code = out.status.code().unwrap_or(-1);
+    let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+
+    assert_eq!(
+        code, 2,
+        "removing a guard and using what it guarded, in one commit, must reach a human — \
+         got exit {code}; stdout:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("gate-self-mod") || stdout.contains("checkpoint-removed"),
+        "the fire must name a self-protection checkpoint; stdout:\n{stdout}"
+    );
+}
+
+// ── commitward#9: the registry cannot be the sole protector of the registry ──────
+//
+// #8 shipped `gate-self-mod` and `checkpoint-removed` in the default registry. Both live
+// *in* the registry, so deleting the registry deletes its own guard in the same act — and
+// `checkpoint-removed` cannot fire when there is no base registry to compare against
+// (#4). A single commit that removes the whole file therefore fired nothing at all: the
+// guard was self-referential, and the PR's own `checkpoints.yaml` comments said so.
+//
+// The anchor is compiled into the binary, so there is no on-disk edit that removes it.
+
+/// The acceptance criterion from #9, driven through the shipped CLI on a real repo.
+#[test]
+fn anchor_fires_when_the_whole_registry_is_deleted_in_one_commit() {
+    let (repo, base) = setup("anchor-wipe");
+    let d = &repo.dir;
+    let _ = base;
+
+    // Base: a repo-local registry exists and guards something.
+    std::fs::create_dir_all(d.join(".commitward")).unwrap();
+    std::fs::write(d.join(".commitward/checkpoints.yaml"), REGISTRY).unwrap();
+    git(d, &["add", ".commitward/checkpoints.yaml"]);
+    assert!(
+        git(d, &["commit", "-m", "adopt a registry"])
+            .status
+            .success(),
+        "registry commit"
+    );
+    let base_with_registry = rev_parse_head(d);
+
+    // The attack: delete the registry outright and use what it guarded, in one commit.
+    // Nothing on disk can fire afterwards — there is no registry left to fire from, and
+    // no global one either (--registry points at nothing).
+    assert!(
+        git(d, &["rm", "-q", ".commitward/checkpoints.yaml"])
+            .status
+            .success(),
+        "git rm registry"
+    );
+    std::fs::write(d.join("danger.sh"), "echo hi\n").unwrap();
+    git(d, &["add", "danger.sh"]);
+    assert!(
+        git(d, &["commit", "-m", "simplify"]).status.success(),
+        "attack commit"
+    );
+
+    let out = commitward(
+        d,
+        &[
+            "--base",
+            &base_with_registry,
+            "--registry",
+            "/nonexistent/global.yaml",
+            "--format",
+            "json",
+        ],
+    );
+    let code = out.status.code().unwrap_or(-1);
+    let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+
+    assert_eq!(
+        code, 2,
+        "deleting the registry that guards the registry must still reach a human — \
+         got exit {code}; stdout:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("checkpoints.yaml"),
+        "the fire must name the registry file that was removed; stdout:\n{stdout}"
+    );
+}
+
+#[test]
+fn anchor_does_not_fire_on_an_ordinary_commit() {
+    // Guard: an anchor that fires on everything is not a gate, it is a nuisance that
+    // teaches people to pass --format and ignore the output. Same repo shape as above,
+    // minus the registry edit.
+    let (repo, base) = setup("anchor-quiet");
+    let d = &repo.dir;
+    std::fs::write(d.join("README.md"), "seed\nmore prose\n").unwrap();
+    git(d, &["add", "README.md"]);
+    assert!(
+        git(d, &["commit", "-m", "docs"]).status.success(),
+        "ordinary commit"
+    );
+
+    let out = commitward(
+        d,
+        &[
+            "--base",
+            &base,
+            "--registry",
+            "/nonexistent/global.yaml",
+            "--format",
+            "json",
+        ],
+    );
+    let code = out.status.code().unwrap_or(-1);
+    let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+    assert_eq!(
+        code, 0,
+        "an ordinary commit must still pass; stdout:\n{stdout}"
     );
 }

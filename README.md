@@ -125,8 +125,15 @@ Request fields (all optional; evaluation fails open on absent inputs): `diff`, `
 `base_repo_registry_yaml` (for checkpoint-removed detection). The block **decision** is carried in
 `body.exit_class` (0 none fired · 1 fired-but-all-acked · 2 unacked fire), **not** the process exit
 code — the process exits 0 on any successful evaluation, so a consumer never mistakes a fired gate
-for a transport failure. A malformed request yields `status:"error"` + a non-zero exit. The native
-git-reading CLI above stays the path for commit-msg hooks and standalone use.
+for a transport failure. A malformed request — or a **supplied registry that will not parse** —
+yields `status:"error"` + a non-zero exit. The native git-reading CLI above stays the path for
+commit-msg hooks and standalone use.
+
+`body.warnings` is a (possibly empty) list of checks that could **not** be performed. `exit_class:
+0` means "nothing fired", which is indistinguishable from "nothing was checked" unless the response
+says so — e.g. omitting `base_*_registry_yaml` leaves the `checkpoint-removed` guard inactive, and
+supplying no registry at all means every commit passes. Treat a non-empty `warnings` as a
+configuration defect, not as noise.
 
 ## License
 
