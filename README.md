@@ -5,6 +5,9 @@
 [![Downloads](https://img.shields.io/crates/d/commitward)](https://crates.io/crates/commitward)
 [![License](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](#license)
 
+**Integrity plane · Active** — under development; the surface still moves.
+See the [component map](https://github.com/Barnett-Studios) for how this fits the rest.
+
 **A deterministic, fail-open human-sign-off gate for high-stakes commits.**
 
 `commitward` matches a commit's diff against a checkpoint registry and blocks the commit
