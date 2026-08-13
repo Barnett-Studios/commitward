@@ -20,9 +20,13 @@
 set -euo pipefail
 
 IMAGE="${1:?usage: container_documented_path.sh <image-tag>}"
+# An explicit template so `$TMPDIR` is honoured: bare `mktemp -d` ignores it on macOS, and a
+# container runtime that only shares part of the filesystem (colima shares `$HOME`) mounts
+# anything outside as a silently EMPTY directory — which fails as "the gate evaluated nothing",
+# indistinguishable from the defect this script exists to catch. Set TMPDIR to a shared path.
 # pwd -P: on a host whose temp dir is a symlink (macOS /var → /private/var), the symlinked
-# path is not what the container runtime shares.
-WORK="$(cd "$(mktemp -d)" && pwd -P)"
+# path is not what the runtime shares either.
+WORK="$(cd "$(mktemp -d "${TMPDIR:-/tmp}/commitward-doc-path-XXXXXX")" && pwd -P)"
 trap 'rm -rf "$WORK"' EXIT
 # A git checkout is 755 under the usual umask; `mktemp -d` is 700, which uid 10001 inside
 # the container cannot even traverse. Without this the fixture tests a case the README's
@@ -43,8 +47,11 @@ OUT=""
 DOCKER_UID_ARGS=()
 run_gate() {
     set +e
-    OUT="$(docker run --rm "${DOCKER_UID_ARGS[@]}" -v "$WORK:/repo" "$IMAGE" \
-           --cached --format json 2>"$WORK/.stderr")"
+    # `${a[@]+"${a[@]}"}` and not `"${a[@]}"`: under `set -u`, bash 3.2 — which is what macOS
+    # ships — treats an empty array expansion as an unbound variable and aborts. The CI
+    # runner's bash 5 does not, so this only ever failed for someone running it by hand.
+    OUT="$(docker run --rm ${DOCKER_UID_ARGS[@]+"${DOCKER_UID_ARGS[@]}"} -v "$WORK:/repo" \
+           "$IMAGE" --cached --format json 2>"$WORK/.stderr")"
     CODE=$?
     set -e
     if [ -z "$OUT" ]; then
@@ -70,13 +77,22 @@ if [ "$CODE" != "0" ]; then
     exit 1
 fi
 
-# 2. Staging checkpoints.yaml is the one change `anchor-gate-integrity` guarantees fires, and
-#    it supplies no registry of its own — so this also proves the image's baseline is reachable.
+# 2. Staging checkpoints.yaml is the one change `anchor-gate-integrity` guarantees fires. It
+#    supplies no registry of its own, so the second grep is a separate fact: `gate-self-mod`
+#    lives in the SHIPPED baseline, and it can only fire if the image baked that baseline in
+#    and pointed COMMITWARD_REGISTRY at it. The anchor is compiled into the binary and fires
+#    either way — an image with no registry at all passes the first grep alone, which is how
+#    that omission stayed invisible.
 printf 'version: "1"\ncheckpoints: []\n' > "$WORK/checkpoints.yaml"
 g add -A
 run_gate
 if ! printf '%s' "$OUT" | grep -q 'anchor-gate-integrity'; then
     echo "FAIL: staging checkpoints.yaml did not fire the compiled-in anchor: $OUT" >&2
+    exit 1
+fi
+if ! printf '%s' "$OUT" | grep -q 'gate-self-mod'; then
+    echo "FAIL: the shipped registry's own checkpoint did not fire — the image has no baked" >&2
+    echo "      baseline, so every checkpoint but the compiled-in anchor is inactive: $OUT" >&2
     exit 1
 fi
 if [ "$CODE" != "2" ]; then
