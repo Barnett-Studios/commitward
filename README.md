@@ -49,6 +49,11 @@ docker run --rm -v "$PWD:/repo" ghcr.io/barnett-studios/commitward \
   --base origin/main --format markdown
 ```
 
+The image runs as uid 10001 and only ever **reads** the repo, so a checkout with the usual 755
+permissions needs nothing further. A repo that is not world-readable does: add
+`-u "$(id -u):$(id -g)"`, or the container cannot traverse the mount and the run goes silent in the
+way described below.
+
 This form reads the mounted repo with git, so the image ships `git`, a `safe.directory` allowance
 for the foreign-owned mount, and the default checkpoint baseline at
 `/etc/commitward/checkpoints.yaml`. Without either of the first two the gate fails open exactly as

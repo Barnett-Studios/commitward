@@ -24,6 +24,12 @@ IMAGE="${1:?usage: container_documented_path.sh <image-tag>}"
 # path is not what the container runtime shares.
 WORK="$(cd "$(mktemp -d)" && pwd -P)"
 trap 'rm -rf "$WORK"' EXIT
+# A git checkout is 755 under the usual umask; `mktemp -d` is 700, which uid 10001 inside
+# the container cannot even traverse. Without this the fixture tests a case the README's
+# form does not describe — and fails with the same silent empty stdout, which is how it was
+# noticed. The `-u` invocation at the end of this script is the case for a repo that really
+# is private.
+chmod 755 "$WORK"
 
 # core.hooksPath=/dev/null: the host may have a global commit-msg hook installed — plausibly
 # commitward's own — and this fixture must not be gated by it.
@@ -34,9 +40,11 @@ g() {
 
 CODE=0
 OUT=""
+DOCKER_UID_ARGS=()
 run_gate() {
     set +e
-    OUT="$(docker run --rm -v "$WORK:/repo" "$IMAGE" --cached --format json 2>"$WORK/.stderr")"
+    OUT="$(docker run --rm "${DOCKER_UID_ARGS[@]}" -v "$WORK:/repo" "$IMAGE" \
+           --cached --format json 2>"$WORK/.stderr")"
     CODE=$?
     set -e
     if [ -z "$OUT" ]; then
@@ -76,4 +84,17 @@ if [ "$CODE" != "2" ]; then
     exit 1
 fi
 
-echo "ok: $IMAGE allows an ordinary change (exit 0) and fires on the documented path (exit 2)"
+# 3. A repo that is not world-readable. The documented form runs as the image's uid 10001,
+#    which cannot traverse a 700 checkout — same silent empty stdout as a missing git. The
+#    answer is `-u`, and it has to keep working: commitward only ever reads the repo, so it
+#    needs no identity of its own.
+chmod 700 "$WORK"
+DOCKER_UID_ARGS=(-u "$(id -u):$(id -g)")
+run_gate
+if [ "$CODE" != "2" ]; then
+    echo "FAIL: -u form on a private repo must still fire, got exit $CODE: $OUT" >&2
+    exit 1
+fi
+
+echo "ok: $IMAGE allows an ordinary change (exit 0), fires on the documented path (exit 2),
+    and still fires as -u \$(id -u) on a non-world-readable repo"
