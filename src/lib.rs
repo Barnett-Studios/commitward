@@ -233,8 +233,21 @@ pub fn anchor_checkpoints() -> Vec<Checkpoint> {
         paths: vec![
             r"(^|/)\.commitward/checkpoints\.yaml$".to_string(),
             r"(^|/)checkpoints\.yaml$".to_string(),
-            r"(^|/)\.git-hooks/commit-msg$".to_string(),
-            r"(^|/)\.git/hooks/commit-msg$".to_string(),
+            // Any depth, any directory name — NOT an enumeration of hook conventions
+            // (commitward#14). `install-hook.sh` installs to `$1`, else
+            // `$COMMITWARD_HOOKS_DIR`, else `$(git rev-parse --git-dir)/hooks`: the first
+            // two are arbitrary, so no list of directory names can be complete, and the
+            // previous list was empirically incomplete — it named `.git-hooks/` and the
+            // untrackable `.git/hooks/`, while dotclaude's own gate hook lives at
+            // `scripts/git-hooks/commit-msg` and had to be re-declared by hand in a
+            // repo-local registry (see tests/corpus/.dotclaude/checkpoints.yaml).
+            //
+            // This is the choice `(^|/)checkpoints\.yaml$` already made one line up, for
+            // the same reason. `commit-msg` names exactly one thing in a git repo; a
+            // spurious fire costs one HITL-ACK line, a miss leaves the gate's own hook
+            // unguarded. `commit-msg.sample` and the installer's `commit-msg.pre-commitward`
+            // backup do not match — only the live hook does.
+            r"(^|/)commit-msg$".to_string(),
             r"(^|/)install-hook\.sh$".to_string(),
         ],
         content: vec![],

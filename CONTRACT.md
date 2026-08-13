@@ -38,8 +38,16 @@ fire at all (commitward#4). A registry cannot be the sole thing that protects th
 **So one checkpoint is not in the registry.** `compile()` merges `anchor_checkpoints()` —
 `anchor-gate-integrity`, compiled into the binary — into *every* registry, including an empty one,
 and applies it last so a same-named on-disk entry cannot shadow it. It watches the gate's own files
-(`checkpoints.yaml` at any depth, `.commitward/checkpoints.yaml`, the commit-msg hook,
-`install-hook.sh`). There is no edit to a YAML file that removes it, and no registry at all is still
+(`checkpoints.yaml` at any depth, `.commitward/checkpoints.yaml`, any file named `commit-msg` at
+any depth, `install-hook.sh`).
+
+The hook pattern is deliberately not a list of hook-directory conventions. `install-hook.sh` takes
+the hooks directory as its first argument (else `$COMMITWARD_HOOKS_DIR`, else the repo-local hooks
+dir), so the set of installable locations is open and no enumeration can be complete — the previous
+list named `.git-hooks/` and `.git/hooks/`, the second of which git can never show in a diff because
+nothing under `.git/` is tracked, while `.githooks/`, `.husky/` and dotclaude's own
+`scripts/git-hooks/` fired nothing (commitward#14). `commit-msg` names exactly one thing in a git
+repo; `commit-msg.sample` and the installer's `commit-msg.pre-commitward` backup do not match. There is no edit to a YAML file that removes it, and no registry at all is still
 not an unguarded gate.
 
 Consequences worth stating: a commit that touches a registry or the hook now **always** fires at

@@ -86,6 +86,67 @@ fn shipped_registry_guards_the_installed_hook() {
     );
 }
 
+/// Hook locations enumerated from `install-hook.sh`'s own resolution order — `$1`, then
+/// `$COMMITWARD_HOOKS_DIR`, then `$(git rev-parse --git-dir)/hooks` — not from the
+/// conventions that happened to be listed in the registry. The first two are arbitrary
+/// directories, which is why the last case here is the load-bearing one: it is the case no
+/// enumeration of directory *names* can ever cover (commitward#14).
+///
+/// `scripts/git-hooks/` is not hypothetical — it is where dotclaude's gate hook lives, and
+/// before this it had to be re-declared by hand in a repo-local registry.
+const HOOK_LOCATIONS: &[&str] = &[
+    ".git-hooks/commit-msg",
+    ".githooks/commit-msg",
+    ".husky/commit-msg",
+    "hooks/commit-msg",
+    "scripts/git-hooks/commit-msg",
+    "some/operator/chosen/dir/commit-msg",
+    "commit-msg",
+];
+
+#[test]
+fn every_installable_hook_location_is_guarded() {
+    for loc in HOOK_LOCATIONS {
+        let fired = fire(shipped(), &[modified(loc)], None);
+        assert!(
+            fired.contains(&"gate-self-mod".to_string()),
+            "a commit-msg hook at {loc} can be installed and can be deleted, so it must \
+             fire; got {fired:?}"
+        );
+    }
+}
+
+#[test]
+fn the_anchor_covers_them_too_with_no_registry_at_all() {
+    // The anchor is the floor: an empty registry must still guard every one of these.
+    for loc in HOOK_LOCATIONS {
+        let fired = fire(Vec::new(), &[modified(loc)], None);
+        assert!(
+            fired.contains(&"anchor-gate-integrity".to_string()),
+            "no registry at all is still not an unguarded gate — {loc} fired {fired:?}"
+        );
+    }
+}
+
+#[test]
+fn the_hook_pattern_does_not_swallow_neighbouring_files() {
+    // The bound on widening. `commit-msg.sample` is git's inert template and
+    // `commit-msg.pre-commitward` is the installer's own backup of a foreign hook — neither
+    // is the live hook, and firing on them would be the "warning operators learn to skip".
+    for quiet in [
+        ".git-hooks/commit-msg.sample",
+        ".git-hooks/commit-msg.pre-commitward",
+        "src/commit-msg.rs",
+        "docs/commit-msg-format.md",
+    ] {
+        let fired = fire(Vec::new(), &[modified(quiet)], None);
+        assert!(
+            !fired.contains(&"anchor-gate-integrity".to_string()),
+            "{quiet} is not the live hook and must not fire; got {fired:?}"
+        );
+    }
+}
+
 #[test]
 fn shipped_registry_detects_a_removed_checkpoint() {
     let base = names_of(&shipped());
