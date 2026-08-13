@@ -79,9 +79,14 @@ pub struct Fired {
 ///   regex, if any entry in `added_lines[path]` matches any content pattern →
 ///   include the file path in `matched`.
 /// - **Semantic `CheckpointRemoved`**: fires only when `base_checkpoint_names`
-///   is `Some`, at least one file path ends with `checkpoints.yaml`, and the
-///   set difference `base_names − current_names` is non-empty. `matched` = the
-///   removed names.
+///   is `Some`, at least one changed file is a registry, and the set difference
+///   `base_names − current_names` is non-empty. `matched` = the removed names.
+///
+/// `base_checkpoint_names` distinguishes two states a caller must not conflate:
+/// `None` is "I could not find out what the base registry held", and `Some(&[])` is "the
+/// base registry held nothing". Both produce no removals, but only the second is an answer
+/// — under `None` the guard did not run, and a caller reporting a clean pass without saying
+/// so is reporting a check it never performed. See [`checkpoint_removed_is_compiled`].
 ///
 /// Returns one `Fired` per checkpoint with a non-empty match list.
 pub fn detect(
@@ -89,6 +94,29 @@ pub fn detect(
     files: &[FileEntry],
     added_lines: &HashMap<String, Vec<String>>,
     base_checkpoint_names: Option<&[String]>,
+) -> Vec<Fired> {
+    detect_with_registry_paths(checkpoints, files, added_lines, base_checkpoint_names, &[])
+}
+
+/// [`detect`], told which repo-relative paths are registries for this run.
+///
+/// The `CheckpointRemoved` guard requires the change to touch a registry, and with no paths
+/// supplied the only test available is "the path ends with `checkpoints.yaml`". That is
+/// right for the two documented locations and silently wrong for the third: a registry
+/// located by `$COMMITWARD_REGISTRY` or `--registry` may be named anything, so editing it to
+/// delete a checkpoint is a change the guard cannot see (commitward#4). CONTRACT.md already
+/// records the same blind spot for `gate-self-mod`, where the operator can at least add the
+/// path to the pattern themselves; here the test was hard-coded, so there was no escape.
+///
+/// `registry_paths` are additive to the suffix rule, never a replacement — a caller that
+/// names its non-standard global registry must not thereby stop matching a repo-local
+/// `.commitward/checkpoints.yaml` it did not think to list.
+pub fn detect_with_registry_paths(
+    checkpoints: &[CompiledCheckpoint],
+    files: &[FileEntry],
+    added_lines: &HashMap<String, Vec<String>>,
+    base_checkpoint_names: Option<&[String]>,
+    registry_paths: &[String],
 ) -> Vec<Fired> {
     let current_names: std::collections::HashSet<&str> =
         checkpoints.iter().map(|c| c.name.as_str()).collect();
@@ -122,8 +150,10 @@ pub fn detect(
                 Mode::Semantic(SemanticKind::CheckpointRemoved) => match base_checkpoint_names {
                     None => vec![],
                     Some(base_names) => {
-                        let has_registry_touch =
-                            files.iter().any(|f| f.path.ends_with("checkpoints.yaml"));
+                        let has_registry_touch = files.iter().any(|f| {
+                            f.path.ends_with("checkpoints.yaml")
+                                || registry_paths.iter().any(|r| r == &f.path)
+                        });
                         if !has_registry_touch {
                             vec![]
                         } else {
@@ -148,6 +178,23 @@ pub fn detect(
             }
         })
         .collect()
+}
+
+/// Is a `checkpoint_removed` guard actually in this compiled registry?
+///
+/// The question a caller has to answer before warning that the guard could not run. Warning
+/// unconditionally on a missing base is not free: it fires on every registry that never had
+/// such a checkpoint, where nothing was disabled and there is nothing to act on, and a
+/// warning that cries wolf on the ordinary path is one operators learn to skip — which costs
+/// exactly the case it exists for.
+///
+/// The denominator is the COMPILED registry, not the caller's configuration: a caller that
+/// decided from its own flags whether the guard exists would be answering from the wrong
+/// source the moment a repo-local registry adds one.
+pub fn checkpoint_removed_is_compiled(checkpoints: &[CompiledCheckpoint]) -> bool {
+    checkpoints
+        .iter()
+        .any(|c| matches!(c.mode, Mode::Semantic(SemanticKind::CheckpointRemoved)))
 }
 
 /// Wrapper matching the top-level YAML structure.
@@ -812,6 +859,129 @@ checkpoints:
         assert!(extract_checkpoint_names("").is_empty());
         // Unparseable → empty vec, no panic.
         assert!(extract_checkpoint_names("not: valid: yaml: [\n").is_empty());
+    }
+
+    // ── commitward#4: unavailable base, and registries by any name ────────────
+
+    /// Only the `registry-shrunk` fires. `compile` merges the compiled-in
+    /// `anchor-gate-integrity` into every registry (commitward#9) and it fires on any
+    /// registry path — so an unfiltered `is_empty()` here would be asserting the anchor's
+    /// behaviour while claiming to assert the semantic guard's.
+    fn shrunk_fires(fired: &[Fired]) -> Vec<&Fired> {
+        fired
+            .iter()
+            .filter(|f| f.name == "registry-shrunk")
+            .collect()
+    }
+
+    fn removed_guard() -> Vec<CompiledCheckpoint> {
+        compile(vec![Checkpoint {
+            name: "registry-shrunk".to_string(),
+            summary: "a checkpoint was removed".to_string(),
+            standards_doc: None,
+            paths: vec![],
+            content: vec![],
+            content_exempt_paths: vec![],
+            semantic: Some("checkpoint_removed".to_string()),
+        }])
+        .expect("compile")
+    }
+
+    /// `None` and `Some(&[])` are different claims and must not be collapsed.
+    ///
+    /// Both produce no removals, so no test comparing only `fired` can tell them apart —
+    /// which is exactly why the CLI could pass `Some(vec![])` after a failed lookup for so
+    /// long. The difference is what a CALLER is entitled to say afterwards, so it is pinned
+    /// on the predicate the caller uses to decide.
+    #[test]
+    fn an_unavailable_base_and_an_empty_one_are_not_the_same_claim() {
+        let compiled = removed_guard();
+        let files = vec![FileEntry {
+            status: 'M',
+            path: "promise/checkpoints.yaml".to_string(),
+        }];
+        let empty = HashMap::new();
+
+        assert!(
+            shrunk_fires(&detect(&compiled, &files, &empty, None)).is_empty(),
+            "no base: nothing can be reported as removed"
+        );
+        assert!(
+            shrunk_fires(&detect(&compiled, &files, &empty, Some(&[]))).is_empty(),
+            "empty base: nothing was declared, so nothing was removed"
+        );
+        // …and the guard IS present, so a caller seeing `None` above owes the operator a
+        // warning. This is the predicate that tells it so.
+        assert!(checkpoint_removed_is_compiled(&compiled));
+    }
+
+    /// The converse, which is what keeps the warning worth reading: a registry with no
+    /// `checkpoint_removed` entry has nothing to disable, so an unavailable base is not
+    /// worth a word.
+    #[test]
+    fn a_registry_without_the_semantic_guard_has_nothing_to_report() {
+        let compiled = compile(vec![Checkpoint {
+            name: "danger".to_string(),
+            summary: "paths only".to_string(),
+            standards_doc: None,
+            paths: vec!["(^|/)danger\\.sh$".to_string()],
+            content: vec![],
+            content_exempt_paths: vec![],
+            semantic: None,
+        }])
+        .expect("compile");
+        assert!(!checkpoint_removed_is_compiled(&compiled));
+    }
+
+    /// A registry named anything else — the `$COMMITWARD_REGISTRY` / `--registry` case.
+    /// Without the caller naming it, the only test available is the `checkpoints.yaml`
+    /// suffix, and editing `my-gates.yaml` to delete a checkpoint is invisible.
+    #[test]
+    fn a_registry_under_a_non_standard_name_is_only_seen_when_named() {
+        let compiled = removed_guard();
+        let files = vec![FileEntry {
+            status: 'M',
+            path: "config/my-gates.yaml".to_string(),
+        }];
+        let empty = HashMap::new();
+        let base = vec!["doomed".to_string()];
+
+        assert!(
+            shrunk_fires(&detect(&compiled, &files, &empty, Some(&base))).is_empty(),
+            "the suffix rule alone cannot see this file"
+        );
+
+        let named = vec!["config/my-gates.yaml".to_string()];
+        let fired = detect_with_registry_paths(&compiled, &files, &empty, Some(&base), &named);
+        let shrunk = shrunk_fires(&fired);
+        assert_eq!(
+            shrunk.len(),
+            1,
+            "named as a registry, the removal is visible"
+        );
+        assert_eq!(shrunk[0].matched, vec!["doomed".to_string()]);
+    }
+
+    /// Naming a non-standard registry must not cost the suffix rule — a caller that lists
+    /// its odd global path has not thereby told the guard to ignore a repo-local
+    /// `.commitward/checkpoints.yaml` it never mentioned.
+    #[test]
+    fn naming_a_registry_is_additive_to_the_suffix_rule() {
+        let compiled = removed_guard();
+        let files = vec![FileEntry {
+            status: 'M',
+            path: ".commitward/checkpoints.yaml".to_string(),
+        }];
+        let empty = HashMap::new();
+        let base = vec!["doomed".to_string()];
+        let named = vec!["config/my-gates.yaml".to_string()];
+
+        let fired = detect_with_registry_paths(&compiled, &files, &empty, Some(&base), &named);
+        assert_eq!(
+            shrunk_fires(&fired).len(),
+            1,
+            "the suffix rule still applies alongside the named paths"
+        );
     }
 
     // ── Task 6: ADR-0010 residual gap ─────────────────────────────────────────

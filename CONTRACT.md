@@ -32,8 +32,28 @@ must never be reported as a check that passed. Concretely (commitward#7):
 than nothing.
 
 Those two entries do not survive removal of themselves — they live in the file they guard, and
-`checkpoint-removed` additionally needs base checkpoint names, so with no base registry it cannot
-fire at all (commitward#4). A registry cannot be the sole thing that protects the registry.
+`checkpoint-removed` additionally needs base checkpoint names, so with no resolvable base ref it
+cannot fire at all. A registry cannot be the sole thing that protects the registry.
+
+**It now says so instead of passing quietly (commitward#4).** Two states were being conflated. An
+unresolvable base ref — a shallow clone, an unknown base, a repository with no commits — means the
+guard *did not run*; a base ref that resolves to a commit with no registry means it ran and found
+nothing to have been removed. Only the first is `base_checkpoint_names: None`, and only the first
+warns. The CLI used to turn a failed lookup into an empty set and pass `Some(&[])`, so an
+un-runnable guard was indistinguishable from a clean one — the fail-*silent* direction, at the one
+front door the `gate` envelope's `body.warnings` did not cover. The CLI's `--format json` now
+carries the same `warnings` array, and the warning is conditional on a `checkpoint_removed` entry
+actually being compiled: on a registry that declares none, nothing was disabled, and a warning on
+the ordinary path is one operators learn to skip.
+
+**A registry is recognised by the paths in play, not only by its filename.** `checkpoint-removed`
+requires the change to touch a registry, and the library's default test is the `checkpoints.yaml`
+suffix. A registry located by `$COMMITWARD_REGISTRY` or `--registry` may be named anything, so
+editing it to delete a checkpoint used to be invisible — the same blind spot recorded below for
+`gate-self-mod`, but with no operator escape because the test was hard-coded. The CLI now names its
+registries via `detect_with_registry_paths`, additively to the suffix rule. The CLI also unions base
+names from **both** registries; it previously read only the repo one, so a checkpoint removed from
+the global registry was caught by the `gate` envelope and not by the CLI.
 
 **So one checkpoint is not in the registry.** `compile()` merges `anchor_checkpoints()` —
 `anchor-gate-integrity`, compiled into the binary — into *every* registry, including an empty one,
@@ -72,7 +92,7 @@ commitward [OPTIONS]
 Both registry paths, plus the installed `commit-msg` hook and `install-hook.sh`, are guarded by the
 default `gate-self-mod` checkpoint. A registry located via `$COMMITWARD_REGISTRY` cannot be matched
 by a static pattern — add its path to `gate-self-mod` yourself if you use that variable.
-| `--format <text\|json\|markdown>` | `text` | output format |
+| `--format <text\|json\|markdown>` | `text` | output format. `json` is `{fired, acked, unacked, warnings}` — `warnings` names the guards that could not run, matching the `gate` envelope's `body.warnings` |
 | `-h`, `--help` | — | usage |
 
 **Diff semantics:** commitward shells `git diff -c core.quotePath=false --<mode>
@@ -100,8 +120,16 @@ pub fn detect(
     checkpoints: &[CompiledCheckpoint],
     files: &[FileEntry],
     added_lines: &HashMap<String, Vec<String>>,
-    base_checkpoint_names: Option<&[String]>,
+    base_checkpoint_names: Option<&[String]>,   // None = could not find out; Some(&[]) = base held nothing
 ) -> Vec<Fired>;
+pub fn detect_with_registry_paths(                // as `detect`, plus the repo-relative
+    checkpoints: &[CompiledCheckpoint],           // registry paths in play, so a registry
+    files: &[FileEntry],                          // named anything else is still recognised
+    added_lines: &HashMap<String, Vec<String>>,   // (additive to the `checkpoints.yaml` rule)
+    base_checkpoint_names: Option<&[String]>,
+    registry_paths: &[String],
+) -> Vec<Fired>;
+pub fn checkpoint_removed_is_compiled(checkpoints: &[CompiledCheckpoint]) -> bool;
 pub fn extract_acks(commit_msg: &str) -> Vec<Ack>;
 pub fn partition_ack<'a>(fired: &'a [Fired], acks: &[Ack]) -> (Vec<&'a Fired>, Vec<&'a Fired>);
 pub fn exit_class(fired_len: usize, unacked_len: usize) -> i32; // 0 | 1 | 2, self-contained
