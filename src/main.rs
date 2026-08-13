@@ -12,8 +12,9 @@ use std::process::Command;
 
 use commitward::gitdiff::{parse_added_lines, parse_name_status};
 use commitward::{
-    compile, detect, exit_class, extract_acks, extract_checkpoint_names, load_checkpoints, merge,
-    partition_ack, Checkpoint, FileEntry,
+    checkpoint_removed_is_compiled, compile, detect, detect_with_registry_paths, exit_class,
+    extract_acks, extract_checkpoint_names, load_checkpoints, merge, partition_ack, Checkpoint,
+    FileEntry,
 };
 use serde::Deserialize;
 
@@ -375,21 +376,85 @@ fn run() -> i32 {
         .unwrap_or_default();
 
     // ── Base checkpoint names for checkpoint-removed detection. ─────────────
-    // Read the repo-registry file as it stood at the base ref; a checkpoint that
-    // exists at base but not now was removed.
+    // Read each registry as it stood at the base ref; a checkpoint that exists at base but
+    // not now was removed.
+    //
+    // BOTH registries, unioned — not just the repo one (commitward#4). The gate envelope
+    // unions `base_repo_registry_yaml` and `base_global_registry_yaml`, and its comment said
+    // it was "matching the native CLI"; the native CLI read only the repo registry, so a
+    // checkpoint that lived in the global one and was deleted was detected through one front
+    // door and not the other. The comment asserting the parity is what kept that invisible.
+    //
+    // A registry outside the repo tree is skipped rather than failed on: `git show <ref>:
+    // <path>` can only address paths inside the work tree, so an installed baseline at
+    // /etc/commitward has no base version to read and never did.
+    // WHETHER THE REF RESOLVES is the discriminator, not whether a registry was found at it.
+    //
+    // `git show <ref>:<path>` fails for two reasons that must not be conflated. If the ref
+    // resolves and the file is not there, that is an ANSWER — the base declared no
+    // checkpoints, so nothing can have been removed from it. That is the ordinary state of
+    // the commit that first adopts a registry. If the ref does not resolve at all — a shallow
+    // clone, an unknown base, a repository with no commits — there is no answer to be had and
+    // the guard cannot run.
+    //
+    // Only the second is `None`. Keying off the read instead would warn on every adoption
+    // commit, and a warning that fires on the ordinary path is one operators learn to skip.
     let name_ref: &str = if cached { "HEAD" } else { base_ref.as_str() };
-    let repo_rel = repo_path
-        .strip_prefix(&repo_root)
-        .unwrap_or(Path::new(".commitward/checkpoints.yaml"));
-    let base_names: Vec<String> = git_show(&repo_root, name_ref, &repo_rel.to_string_lossy())
-        .map(|text| extract_checkpoint_names(&text))
-        .unwrap_or_default()
-        .into_iter()
-        .collect::<HashSet<_>>()
-        .into_iter()
+    let base_ref_resolves = git_rev_parse_commit(&repo_root, name_ref);
+    let mut base_names: HashSet<String> = HashSet::new();
+    if base_ref_resolves {
+        for path in [&repo_path, &global_path] {
+            let Some(rel) = repo_relative(path, &repo_root) else {
+                continue; // outside the repo: no base version exists to read
+            };
+            if let Some(text) = git_show(&repo_root, name_ref, &rel) {
+                base_names.extend(extract_checkpoint_names(&text));
+            }
+        }
+    }
+
+    // `None` — not `Some(&[])` — when the ref did not resolve. They are different claims:
+    // `Some(&[])` says the base declared no checkpoints, so nothing can have been removed.
+    // Passing it after a failed lookup reports a check that never ran as a check that passed,
+    // which is the one failure mode CONTRACT.md says a gate must not have. The CLI did
+    // exactly that on every shallow clone and every unknown base ref, because
+    // `git_show(..).unwrap_or_default()` turned "could not find out" into "found nothing".
+    let base_arg: Option<Vec<String>> = if base_ref_resolves {
+        Some(base_names.into_iter().collect())
+    } else {
+        None
+    };
+
+    // The registries in play, so a `$COMMITWARD_REGISTRY` under a non-standard name is still
+    // recognised as a registry when it changes (the library's fallback only knows the
+    // `checkpoints.yaml` suffix).
+    let registry_paths: Vec<String> = [&repo_path, &global_path]
+        .iter()
+        .filter_map(|p| repo_relative(p, &repo_root))
         .collect();
 
-    let fired = detect(&compiled, &files, &added, Some(&base_names));
+    let fired = detect_with_registry_paths(
+        &compiled,
+        &files,
+        &added,
+        base_arg.as_deref(),
+        &registry_paths,
+    );
+
+    // Fail-open is not fail-silent: name the guard that could not run. Conditional on the
+    // guard being COMPILED — on a registry that declares no `checkpoint_removed` there is
+    // nothing to disable, and a warning on the ordinary path is one operators learn to skip.
+    let mut warnings: Vec<String> = Vec::new();
+    if base_arg.is_none() && checkpoint_removed_is_compiled(&compiled) {
+        warnings.push(format!(
+            "checkpoint-removed guard INACTIVE for this run ({name_ref} does not resolve to a \
+             commit) — a checkpoint deleted in this change will not be detected. Usual \
+             causes: a shallow clone, an unknown base ref, or a repository with no commits."
+        ));
+    }
+    for w in &warnings {
+        eprintln!("commitward: WARNING {w} (fail-open: continuing)");
+    }
 
     // ── Acks. ──────────────────────────────────────────────────────────────
     let commit_msg = match &commit_msg_file {
@@ -401,7 +466,12 @@ fn run() -> i32 {
 
     match format.as_str() {
         "json" => {
-            let obj = serde_json::json!({ "fired": &fired, "acked": &acked, "unacked": &unacked });
+            // `warnings` is additive — a consumer reading `fired`/`acked`/`unacked` is
+            // unaffected, and one that only had stderr to go on now has the same signal the
+            // gate envelope already carried.
+            let obj = serde_json::json!({
+                "fired": &fired, "acked": &acked, "unacked": &unacked, "warnings": &warnings,
+            });
             match serde_json::to_string_pretty(&obj) {
                 Ok(s) => println!("{s}"),
                 Err(e) => eprintln!("commitward: json serialize error: {e}"),
@@ -486,6 +556,56 @@ fn run_git_diff(cwd: &Path, base: Option<&str>, mode: &str) -> std::io::Result<S
         )));
     }
     Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+}
+
+/// A registry's path relative to the repository root, or `None` if it lies outside.
+///
+/// NOT a bare `strip_prefix`. `git rev-parse --show-toplevel` returns a canonical path while
+/// the path a caller passes usually is not, and on macOS a repo under `$TMPDIR` differs by a
+/// whole `/private` prefix. A bare strip fails there and reports "no registry lies inside the
+/// repository" — turning the checkpoint-removed guard off, with a warning stating a reason
+/// that is not the real one, in precisely the environment the tests run in.
+///
+/// The registry FILE is deliberately not canonicalized — only its directory. A registry
+/// deleted by the very change being gated no longer exists in the work tree, and reading it
+/// at the base ref is the whole point.
+///
+/// Canonicalizing the registry's directory is the half that carries this; mutating it away
+/// turns the tests red. Canonicalizing `repo_root` is a no-op whenever `git_toplevel()`
+/// answered — git returns a canonical path — and is kept for the branch where it did not and
+/// `current_dir()` supplied the root instead, which carries no such guarantee. That branch
+/// has no test, so the line is defensive rather than pinned, and saying so beats implying a
+/// coverage it does not have.
+fn repo_relative(path: &Path, repo_root: &Path) -> Option<String> {
+    let root = std::fs::canonicalize(repo_root).unwrap_or_else(|_| repo_root.to_path_buf());
+    let abs = match (path.parent(), path.file_name()) {
+        (Some(dir), Some(name)) => std::fs::canonicalize(dir)
+            .map(|d| d.join(name))
+            .unwrap_or_else(|_| path.to_path_buf()),
+        _ => path.to_path_buf(),
+    };
+    abs.strip_prefix(&root)
+        .ok()
+        .map(|r| r.to_string_lossy().replace('\\', "/"))
+}
+
+/// Does `gitref` name a commit in this repository?
+///
+/// The question that separates "the base declared nothing" from "there is no base to ask" —
+/// the two states the checkpoint-removed guard must not conflate. `^{commit}` so a tag or a
+/// tree does not answer yes for something that cannot be diffed against.
+fn git_rev_parse_commit(cwd: &Path, gitref: &str) -> bool {
+    Command::new("git")
+        .current_dir(cwd)
+        .args([
+            "rev-parse",
+            "--verify",
+            "--quiet",
+            &format!("{gitref}^{{commit}}"),
+        ])
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
 }
 
 fn git_show(cwd: &Path, gitref: &str, path: &str) -> Option<String> {

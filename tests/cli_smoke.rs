@@ -366,3 +366,203 @@ fn anchor_does_not_fire_on_an_ordinary_commit() {
         "an ordinary commit must still pass; stdout:\n{stdout}"
     );
 }
+
+// ── checkpoint-removed: the guard that protects the registry (commitward#4) ───────────────
+//
+// The gate envelope already reported an unresolvable base as a warning (commitward#7). The
+// CLI did not — it passed `Some(vec![])` to `detect` after a failed `git show`, which claims
+// "the base registry declared nothing" rather than "I could not find out". Same control, two
+// front doors, one of them silent.
+
+const REMOVED_REGISTRY: &str = "version: \"1\"\n\
+checkpoints:\n\
+\x20 - name: registry-shrunk\n\
+\x20   summary: a checkpoint was removed from the registry\n\
+\x20   semantic: checkpoint_removed\n\
+\x20 - name: doomed\n\
+\x20   summary: the one that gets deleted\n\
+\x20   paths:\n\
+\x20     - \"(^|/)nothing-matches-this$\"\n";
+
+/// Same registry with `doomed` gone — the removal the semantic guard must catch.
+const REMOVED_REGISTRY_AFTER: &str = "version: \"1\"\n\
+checkpoints:\n\
+\x20 - name: registry-shrunk\n\
+\x20   summary: a checkpoint was removed from the registry\n\
+\x20   semantic: checkpoint_removed\n\
+";
+
+fn json_of(out: &Output) -> serde_json::Value {
+    let text = String::from_utf8_lossy(&out.stdout);
+    serde_json::from_str(&text).unwrap_or_else(|e| panic!("stdout is not json ({e}): {text}"))
+}
+
+/// A base ref that does not resolve is the shallow-clone / first-commit case. The guard
+/// cannot run, and the run must say so instead of exiting 0 like a clean pass.
+#[test]
+fn an_unresolvable_base_warns_that_checkpoint_removed_could_not_run() {
+    let (repo, _base) = setup("no-base");
+    let d = &repo.dir;
+    std::fs::create_dir_all(d.join(".commitward")).unwrap();
+    std::fs::write(d.join(".commitward/checkpoints.yaml"), REMOVED_REGISTRY).unwrap();
+    git(d, &["add", "."]);
+    assert!(git(d, &["commit", "-m", "adopt registry"]).status.success());
+
+    let out = commitward(
+        d,
+        &[
+            "--base",
+            "refs/heads/does-not-exist",
+            "--registry",
+            "/nonexistent/global.yaml",
+            "--repo-registry",
+            d.join(".commitward/checkpoints.yaml").to_str().unwrap(),
+            "--format",
+            "json",
+        ],
+    );
+    let warnings = json_of(&out)["warnings"]
+        .as_array()
+        .expect("the CLI's json carries warnings")
+        .iter()
+        .map(|w| w.as_str().unwrap_or_default().to_string())
+        .collect::<Vec<_>>();
+    assert!(
+        warnings
+            .iter()
+            .any(|w| w.contains("checkpoint-removed") && w.contains("INACTIVE")),
+        "an unresolvable base disables the guard and the run must say so; got {warnings:?}"
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("checkpoint-removed"),
+        "and on stderr too, for the operator who is not parsing json: {stderr}"
+    );
+}
+
+/// The other side, and the one that keeps the warning worth reading: a run whose base
+/// resolves must warn about nothing. A gate that warns on every invocation has told the
+/// operator to stop reading warnings.
+#[test]
+fn a_resolvable_base_produces_no_warning() {
+    let (repo, base) = setup("with-base");
+    let d = &repo.dir;
+    std::fs::create_dir_all(d.join(".commitward")).unwrap();
+    std::fs::write(d.join(".commitward/checkpoints.yaml"), REMOVED_REGISTRY).unwrap();
+    git(d, &["add", "."]);
+    assert!(git(d, &["commit", "-m", "adopt registry"]).status.success());
+
+    let out = commitward(
+        d,
+        &[
+            "--base",
+            &base,
+            "--registry",
+            "/nonexistent/global.yaml",
+            "--repo-registry",
+            d.join(".commitward/checkpoints.yaml").to_str().unwrap(),
+            "--format",
+            "json",
+        ],
+    );
+    assert_eq!(
+        json_of(&out)["warnings"].as_array().map(|a| a.len()),
+        Some(0),
+        "a resolvable base has nothing to warn about: {}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+}
+
+/// …and a registry that declares no `checkpoint_removed` must not warn either, even with no
+/// base at all. Nothing was disabled, so the warning would be about a guard this repo never
+/// asked for.
+#[test]
+fn no_checkpoint_removed_in_the_registry_means_no_warning_about_it() {
+    let (repo, _base) = setup("no-guard");
+    let d = &repo.dir;
+    add_guarded_change(d);
+
+    let out = commitward(
+        d,
+        &[
+            "--base",
+            "refs/heads/does-not-exist",
+            "--registry",
+            "/nonexistent/global.yaml",
+            "--repo-registry",
+            d.join(".commitward/checkpoints.yaml").to_str().unwrap(),
+            "--format",
+            "json",
+        ],
+    );
+    let warnings = json_of(&out)["warnings"]
+        .as_array()
+        .expect("warnings")
+        .clone();
+    assert!(
+        !warnings.iter().any(|w| w
+            .as_str()
+            .unwrap_or_default()
+            .contains("checkpoint-removed")),
+        "this registry has no checkpoint_removed guard, so none was disabled: {warnings:?}"
+    );
+}
+
+/// A checkpoint removed from a registry named something other than `checkpoints.yaml` — the
+/// `$COMMITWARD_REGISTRY` / `--registry` case. The library's fallback only knows the suffix,
+/// so the CLI has to name its registries or the guard cannot see the change that removed one.
+#[test]
+fn a_removal_from_a_non_standard_registry_filename_still_fires() {
+    let (repo, base) = setup("odd-name");
+    let d = &repo.dir;
+    std::fs::write(d.join("my-gates.yaml"), REMOVED_REGISTRY).unwrap();
+    git(d, &["add", "."]);
+    assert!(git(d, &["commit", "-m", "adopt registry"]).status.success());
+    let base_with_registry = rev_parse_head(d);
+
+    // Now delete `doomed` from it. The changed path is `my-gates.yaml` — no `checkpoints.yaml`
+    // suffix anywhere in this repo.
+    std::fs::write(d.join("my-gates.yaml"), REMOVED_REGISTRY_AFTER).unwrap();
+    git(d, &["add", "."]);
+    assert!(git(d, &["commit", "-m", "shrink registry"])
+        .status
+        .success());
+
+    let out = commitward(
+        d,
+        &[
+            "--base",
+            &base_with_registry,
+            "--registry",
+            d.join("my-gates.yaml").to_str().unwrap(),
+            "--repo-registry",
+            "/nonexistent/repo.yaml",
+            "--format",
+            "json",
+        ],
+    );
+    let v = json_of(&out);
+    let fired: Vec<&str> = v["fired"]
+        .as_array()
+        .expect("fired")
+        .iter()
+        .filter_map(|f| f["name"].as_str())
+        .collect();
+    assert!(
+        fired.contains(&"registry-shrunk"),
+        "removing `doomed` from a registry named my-gates.yaml must fire the semantic \
+         guard; got {v}"
+    );
+    let matched: Vec<&str> = v["fired"]
+        .as_array()
+        .expect("fired")
+        .iter()
+        .find(|f| f["name"] == "registry-shrunk")
+        .and_then(|f| f["matched"].as_array())
+        .expect("matched")
+        .iter()
+        .filter_map(|m| m.as_str())
+        .collect();
+    assert_eq!(matched, vec!["doomed"], "and name what was removed");
+    let _ = base;
+}
