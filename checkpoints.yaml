@@ -28,11 +28,16 @@ checkpoints:
     # `(^|/)checkpoints\.yaml$` deliberately matches at any depth, so a registry vendored
     # under a subdirectory (or a test fixture registry) is guarded too. It fires — it does
     # not block; a deliberate change is acknowledged with a HITL-ACK line.
+    #
+    # `(^|/)commit-msg$` is the same choice for the hook, and for the same reason
+    # (commitward#14): install-hook.sh takes the hooks directory as an argument, so
+    # enumerating directory names cannot be complete. The list here used to name
+    # `.git-hooks/` and `.git/hooks/` — the second of which git can never show in a diff,
+    # because nothing under `.git/` is tracked.
     paths:
       - "(^|/)checkpoints\\.yaml$"
       - "(^|/)\\.commitward/checkpoints\\.yaml$"
-      - "(^|/)\\.git-hooks/commit-msg$"
-      - "(^|/)\\.git/hooks/commit-msg$"
+      - "(^|/)commit-msg$"
       - "(^|/)install-hook\\.sh$"
   - name: checkpoint-removed
     summary: "A checkpoint was removed from a registry (the gate was weakened)"
