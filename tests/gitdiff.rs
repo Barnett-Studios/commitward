@@ -78,3 +78,133 @@ diff --git a/danger.sh b/danger.sh
         "a `+++ `-prefixed line inside a hunk must be captured, not treated as a header"
     );
 }
+
+// ── commitward#3: the two parsers must produce the SAME path key ──────────────────────────
+//
+// `detect`'s content arm joins `files` (from --name-status) to `added_lines` (from the
+// unified diff) on the path string. A mismatch is a silent skip: the file's added lines are
+// never scanned against the content denylist and the run reports normally.
+//
+// The path strings below — the `--name-status` fields and the `+++` headers, including
+// where git puts the quotes and its trailing tab — are CAPTURED from a real repository with
+// these filenames staged under `-c core.quotePath=false`, the flag the CLI passes. The
+// `diff --git` / `@@` / `+` scaffolding around them is minimal and written here: what is
+// being pinned is the path forms, and inventing those is how a parser test comes to agree
+// with the parser instead of with git. `tests/quoted_paths_e2e.rs` runs the whole chain
+// against git itself.
+
+use commitward::gitdiff::unquote_c_style;
+
+/// `core.quotePath=false` covers bytes ≥ 0x80 and nothing else. Git C-quotes a path
+/// containing `"`, `\`, or a control character whatever that setting says — which is why
+/// this class survived the flag.
+#[test]
+fn quote_path_false_is_not_enough_for_backslashes_quotes_and_control_chars() {
+    // Captured: git emits these for sub/back\slash.sh, sub/quote".sh, sub/café.sh
+    assert_eq!(
+        unquote_c_style(r#""sub/back\\slash.sh""#),
+        r"sub/back\slash.sh"
+    );
+    assert_eq!(unquote_c_style(r#""sub/quote\".sh""#), "sub/quote\".sh");
+    assert_eq!(
+        unquote_c_style(r#""sub/tab\tinside.sh""#),
+        "sub/tab\tinside.sh"
+    );
+    assert_eq!(
+        unquote_c_style(r#""sub/newline\ninside.sh""#),
+        "sub/newline\ninside.sh"
+    );
+    // Non-ASCII already arrives unquoted under the flag — unchanged, and unquoting is
+    // therefore safe to apply unconditionally.
+    assert_eq!(unquote_c_style("sub/café.sh"), "sub/café.sh");
+    assert_eq!(unquote_c_style("sub/plain.sh"), "sub/plain.sh");
+}
+
+/// Octal escapes are per BYTE, so a multi-byte character is several of them. Decoding
+/// escape-by-escape into a `String` would corrupt it; this decodes to bytes first.
+#[test]
+fn octal_escapes_reassemble_a_multibyte_character() {
+    // What git emits for café.sh under the DEFAULT core.quotePath — the gate envelope's
+    // caller supplies these strings and may not have disabled it.
+    assert_eq!(unquote_c_style(r#""sub/caf\303\251.sh""#), "sub/café.sh");
+}
+
+/// The join, end to end: every one of these paths must key identically on both sides.
+#[test]
+fn both_parsers_agree_on_the_key_for_every_captured_path() {
+    // Verbatim from `git -c core.quotePath=false diff --cached --name-status`.
+    let name_status = concat!(
+        "A\t\"sub/back\\\\slash.sh\"\n",
+        "A\tsub/café.sh\n",
+        "A\tsub/plain.sh\n",
+        "A\t\"sub/quote\\\".sh\"\n",
+        "A\tsub/trail .sh\n",
+        "A\tsub/endswithspace \n",
+    );
+    // Verbatim `+++` headers from the same diff, each followed by one added line so the
+    // parser has something to attribute.
+    let diff = concat!(
+        "diff --git a b\n+++ \"b/sub/back\\\\slash.sh\"\n@@ -0,0 +1 @@\n+DANGER\n",
+        "diff --git a b\n+++ b/sub/café.sh\n@@ -0,0 +1 @@\n+DANGER\n",
+        "diff --git a b\n+++ b/sub/plain.sh\n@@ -0,0 +1 @@\n+DANGER\n",
+        "diff --git a b\n+++ \"b/sub/quote\\\".sh\"\n@@ -0,0 +1 @@\n+DANGER\n",
+        "diff --git a b\n+++ b/sub/trail .sh\t\n@@ -0,0 +1 @@\n+DANGER\n",
+        "diff --git a b\n+++ b/sub/endswithspace \t\n@@ -0,0 +1 @@\n+DANGER\n",
+    );
+
+    let files = parse_name_status(name_status);
+    let added = parse_added_lines(diff);
+    assert_eq!(files.len(), 6, "six paths staged");
+
+    for f in &files {
+        assert!(
+            added.contains_key(&f.path),
+            "no added lines keyed under {:?} — its content would be skipped silently. \
+             Keys present: {:?}",
+            f.path,
+            {
+                let mut k: Vec<&String> = added.keys().collect();
+                k.sort();
+                k
+            }
+        );
+        assert_eq!(
+            added.get(&f.path).map(|v| v.as_slice()),
+            Some(["DANGER".to_string()].as_slice()),
+            "the added line must reach the denylist for {:?}",
+            f.path
+        );
+    }
+}
+
+/// A path whose LAST character is a space. `trim_end()` ate it on one side and not the
+/// other; exactly one trailing tab — git's delimiter — is what may be stripped.
+#[test]
+fn a_path_ending_in_a_space_keys_the_same_on_both_sides() {
+    let files = parse_name_status("A\tsub/endswithspace \n");
+    assert_eq!(files[0].path, "sub/endswithspace ", "name-status keeps it");
+    let added =
+        parse_added_lines("diff --git a b\n+++ b/sub/endswithspace \t\n@@ -0,0 +1 @@\n+DANGER\n");
+    assert!(
+        added.contains_key("sub/endswithspace "),
+        "the trailing space belongs to the path; only git's tab delimiter comes off. \
+         Keys: {:?}",
+        added.keys().collect::<Vec<_>>()
+    );
+}
+
+/// The hunk-state defense must survive the rewrite: a `+++ ` line INSIDE a hunk is added
+/// content, not a header, so prepending `++ note` cannot neutralise scanning for the rest
+/// of the file.
+#[test]
+fn a_plus_plus_plus_line_inside_a_hunk_is_still_content_not_a_header() {
+    let added = parse_added_lines(
+        "diff --git a b\n+++ b/a.sh\n@@ -0,0 +2 @@\n+++ \"b/evil.sh\"\n+DANGER\n",
+    );
+    assert_eq!(
+        added.get("a.sh").map(|v| v.as_slice()),
+        Some(["++ \"b/evil.sh\"".to_string(), "DANGER".to_string()].as_slice()),
+        "both lines belong to a.sh: {added:?}"
+    );
+    assert!(!added.contains_key("evil.sh"), "and no header was believed");
+}

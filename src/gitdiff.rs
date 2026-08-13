@@ -13,6 +13,87 @@
 use crate::FileEntry;
 use std::collections::HashMap;
 
+/// Decode git's C-style path quoting back to the real path (commitward#3).
+///
+/// Git quotes a path whenever it contains a `"`, a backslash, or a control character —
+/// **regardless of `core.quotePath`**, which only governs bytes ≥ 0x80. So
+/// `core.quotePath=false` (which the CLI sets) is enough for `café.sh` and not for
+/// `back\slash.sh`, `quote".sh`, or a path with a tab in it. Measured against real git
+/// output, not inferred:
+///
+/// ```text
+/// name-status : "sub/back\\slash.sh"          +++ header : +++ "b/sub/back\\slash.sh"
+/// name-status : sub/café.sh                   +++ header : +++ b/sub/café.sh
+/// ```
+///
+/// The quoted header is the damaging half. `strip_prefix("+++ b/")` cannot match
+/// `+++ "b/…`, so `current_file` became `None` and every subsequent `+` line was dropped
+/// until the next header — the file's added content was never scanned against the content
+/// denylist, and nothing said so. That is a false negative in a security control, not a
+/// mis-keyed lookup.
+///
+/// Returns the input unchanged when it is not a quoted string, so a caller can apply it
+/// unconditionally. Decodes to BYTES and then lossily to `String`: git emits `\NNN` octal
+/// per byte, so a multi-byte character arrives as several escapes and decoding
+/// escape-by-escape into a `String` would corrupt it.
+pub fn unquote_c_style(s: &str) -> String {
+    let b = s.as_bytes();
+    if b.len() < 2 || b[0] != b'"' || b[b.len() - 1] != b'"' {
+        return s.to_string();
+    }
+    let inner = &b[1..b.len() - 1];
+    let mut out: Vec<u8> = Vec::with_capacity(inner.len());
+    let mut i = 0;
+    while i < inner.len() {
+        if inner[i] != b'\\' {
+            out.push(inner[i]);
+            i += 1;
+            continue;
+        }
+        i += 1;
+        let Some(&c) = inner.get(i) else {
+            // Trailing backslash: not valid git output. Keep it rather than dropping a
+            // byte — this parser is total on arbitrary input by contract.
+            out.push(b'\\');
+            break;
+        };
+        match c {
+            b'a' => out.push(0x07),
+            b'b' => out.push(0x08),
+            b'f' => out.push(0x0c),
+            b'n' => out.push(b'\n'),
+            b'r' => out.push(b'\r'),
+            b't' => out.push(b'\t'),
+            b'v' => out.push(0x0b),
+            b'"' => out.push(b'"'),
+            b'\\' => out.push(b'\\'),
+            b'0'..=b'7' => {
+                // Up to three octal digits, one BYTE.
+                let mut val: u32 = 0;
+                let mut n = 0;
+                while n < 3 {
+                    match inner.get(i) {
+                        Some(&d @ b'0'..=b'7') => {
+                            val = val * 8 + u32::from(d - b'0');
+                            i += 1;
+                            n += 1;
+                        }
+                        _ => break,
+                    }
+                }
+                i -= 1; // the outer `i += 1` below consumes the last digit
+                out.push((val & 0xff) as u8);
+            }
+            // Unknown escape: git does not emit these. Keep the character itself rather
+            // than guessing, so an odd input degrades to a wrong-but-present path instead
+            // of a silently shortened one.
+            other => out.push(other),
+        }
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
 /// Parse `git diff --name-status` output into `FileEntry` rows.
 ///
 /// Each non-empty line is tab-separated: the first field's first char is the
@@ -39,9 +120,12 @@ pub fn parse_name_status(out: &str) -> Vec<FileEntry> {
         if path.is_empty() {
             continue;
         }
+        // Unquoted here and in `parse_added_lines`, so the two views key on the same
+        // string. `detect`'s content arm joins them on the path, and a form mismatch there
+        // is a silent skip (commitward#3).
         entries.push(FileEntry {
             status,
-            path: path.to_string(),
+            path: unquote_c_style(path),
         });
     }
     entries
@@ -56,6 +140,32 @@ pub fn parse_name_status(out: &str) -> Vec<FileEntry> {
 /// This prevents an attacker from prepending a benign `++ note` line to neutralise
 /// content scanning for the rest of a file's additions. `+++ /dev/null` (deletion)
 /// clears the current file; a `diff --git` header resets hunk state.
+/// The destination path from a `+++ ` file header, or `None` if it is not one.
+///
+/// Two forms, both measured against real git output:
+///
+/// ```text
+/// +++ b/sub/plain.sh               unquoted
+/// +++ b/sub/trail .sh\t            unquoted, with git's tab delimiter appended
+/// +++ "b/sub/quote\".sh"           C-quoted — the `b/` is INSIDE the quotes
+/// ```
+///
+/// The tab is stripped as EXACTLY ONE trailing `\t`, not by `trim_end()`. `trim_end()` also
+/// ate a trailing space belonging to the path itself, so `sub/endswithspace ` keyed as
+/// `sub/endswithspace` here and as `sub/endswithspace ` in `parse_name_status` — the desync
+/// commitward#3 describes, which is real but for a narrower input than the ticket states. A
+/// path containing a literal tab is C-quoted, so an unquoted header's trailing tab is
+/// unambiguously git's delimiter.
+fn header_path(line: &str) -> Option<String> {
+    let rest = line.strip_prefix("+++ ")?;
+    if rest.starts_with('"') {
+        let unquoted = unquote_c_style(rest);
+        return unquoted.strip_prefix("b/").map(str::to_string);
+    }
+    let rest = rest.strip_suffix('\t').unwrap_or(rest);
+    rest.strip_prefix("b/").map(str::to_string)
+}
+
 pub fn parse_added_lines(diff: &str) -> HashMap<String, Vec<String>> {
     let mut result: HashMap<String, Vec<String>> = HashMap::new();
     let mut current_file: Option<String> = None;
@@ -76,12 +186,8 @@ pub fn parse_added_lines(diff: &str) -> HashMap<String, Vec<String>> {
                 }
             } else if line == "+++ /dev/null" {
                 current_file = None;
-            } else if let Some(path) = line.strip_prefix("+++ b/") {
-                // Trim trailing whitespace: git appends a '\t' path-boundary
-                // delimiter for filenames with spaces even under core.quotePath=false.
-                current_file = Some(path.trim_end().to_string());
             } else {
-                current_file = None;
+                current_file = header_path(line);
             }
         } else if line.starts_with('+') {
             if let Some(ref file) = current_file {

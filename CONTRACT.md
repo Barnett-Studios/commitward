@@ -76,7 +76,13 @@ by a static pattern — add its path to `gate-self-mod` yourself if you use that
 | `-h`, `--help` | — | usage |
 
 **Diff semantics:** commitward shells `git diff -c core.quotePath=false --<mode>
---diff-filter=ACDMRT --no-renames`. `--no-renames` is deliberate — a rename of a guarded
+--diff-filter=ACDMRT --no-renames`. `core.quotePath=false` stops git escaping bytes ≥ 0x80 and **only**
+those — a path containing `"`, `\`, a tab or a newline is C-quoted whatever that flag says.
+Both parsers decode that quoting (`gitdiff::unquote_c_style`) so the two views of the diff key
+on the same string. They did not, and the content join `added_lines[path]` missed: the file's
+added lines were never scanned against the denylist and the run exited 0 like any clean commit
+(commitward#3). A `+++` header's trailing tab is git's own path delimiter and exactly one is
+stripped — trimming all trailing whitespace ate a space belonging to the path itself. `--no-renames` is deliberate — a rename of a guarded
 file surfaces as delete-old + add-new, so a guard on the *old* path still fires.
 
 **Off switch:** `COMMITWARD_HITL=off` → exit 0 unconditionally.
