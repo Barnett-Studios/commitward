@@ -16,6 +16,11 @@ COPY --from=builder /build/checkpoints.yaml /etc/commitward/checkpoints.yaml
 # The default global registry lives beside no binary in a container, so point at
 # the baked baseline explicitly. A mounted repo can still add repo-local overrides.
 ENV COMMITWARD_REGISTRY=/etc/commitward/checkpoints.yaml
+# git refuses to operate on a repo owned by another uid, and a mounted /repo belongs to
+# the host user rather than to 10001 — so without this every `git diff` fails with
+# "detected dubious ownership", the gate fails open, and stdout is empty. Having git
+# installed is not sufficient on its own (commitward#13).
+RUN git config --system --add safe.directory '*'
 USER commitward
 WORKDIR /repo
 ENTRYPOINT ["commitward"]
