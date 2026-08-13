@@ -12,8 +12,15 @@
 #   docker build -f Dockerfile.dist -t commitward .
 #
 # ubuntu:24.04 matches the release builder (ubuntu-latest, glibc 2.39) and ships
-# libgcc-s1 by default; the binary is OpenSSL-free (rustls), so only
-# ca-certificates is needed for outbound TLS.
+# libgcc-s1 by default; the binary is OpenSSL-free (rustls), so ca-certificates covers
+# outbound TLS.
+#
+# `git` is NOT optional here (commitward#13). WORKDIR is /repo and the documented
+# container form mounts a repo and runs the git-reading CLI, which shells `git diff`.
+# Without git that shell-out fails, the gate fails open exactly as designed, and the
+# process exits 0 with EMPTY stdout — no verdict at all, for any diff. This image was
+# published that way; only the stdin `gate` subcommand (which needs neither git nor a
+# registry) was exercised, so the tested path was fine and the documented one was inert.
 FROM ubuntu:24.04@sha256:786a8b558f7be160c6c8c4a54f9a57274f3b4fb1491cf65146521ae77ff1dc54
 
 LABEL org.opencontainers.image.source="https://github.com/Barnett-Studios/commitward" \
@@ -21,13 +28,26 @@ LABEL org.opencontainers.image.source="https://github.com/Barnett-Studios/commit
       org.opencontainers.image.licenses="MIT OR Apache-2.0"
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        ca-certificates \
+        git ca-certificates \
     && rm -rf /var/lib/apt/lists/* \
     && useradd --uid 10001 --create-home --user-group commitward
 
 # Populated by CI (or a manual tar extraction) before build; buildx sets TARGETARCH.
 ARG TARGETARCH
 COPY --chmod=755 dist/linux/${TARGETARCH}/commitward /usr/local/bin/commitward
+
+# The CLI's default global registry is "beside the binary", which in a container is a
+# path nobody populates — it warned that the global baseline was INACTIVE and carried on.
+# Bake the baseline and point at it explicitly; a mounted repo can still add repo-local
+# overrides. Same two lines as Dockerfile, which had them and is never published.
+COPY checkpoints.yaml /etc/commitward/checkpoints.yaml
+ENV COMMITWARD_REGISTRY=/etc/commitward/checkpoints.yaml
+
+# git refuses to operate on a repo owned by another uid. The mounted repo belongs to the
+# host user, not to 10001, so without this every `git diff` fails with "detected dubious
+# ownership" and the gate silently fails open — the same empty-stdout outcome as having no
+# git at all. `*` (any path) is the only value that works for an unknown mount point.
+RUN git config --system --add safe.directory '*'
 
 USER 10001
 WORKDIR /repo

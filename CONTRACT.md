@@ -161,6 +161,23 @@ baseline is baked at `/etc/commitward/checkpoints.yaml` (`COMMITWARD_REGISTRY` p
 it). Mount a repo at `/repo` to gate it. Same flags, same exit codes, same fail-open
 guarantee as the CLI.
 
+Three things the image must carry for that to be true, and it is one contract for **both**
+Dockerfiles — the source build and the published `Dockerfile.dist`. Measured on the images
+themselves (commitward#13), staging a `checkpoints.yaml` — the change the anchor guarantees
+fires:
+
+| missing | result |
+|---|---|
+| `git` (the CLI shells `git diff`) | fail-open, exit 0, **empty stdout** — no verdict, any diff |
+| `git config --system safe.directory '*'` | same silence: the mount belongs to the host user, not uid 10001, and git answers `fatal: detected dubious ownership`. Installing git is **not** sufficient on its own |
+| the baked baseline at `/etc/commitward/checkpoints.yaml` | not silent — the compiled-in anchor still fires (exit 2), but every checkpoint in the shipped registry is inactive, because the CLI's default is "beside the binary", a path no container populates |
+
+The published image shipped without git and without the baseline for its whole life, because
+the only container path under test was `gate`, which takes the diff and the registry on stdin
+and needs neither. `tests/container_documented_path.sh` now runs the documented form against
+both images in CI, and asserts non-empty stdout separately from the verdict — the failure mode
+of this path is silence, not a wrong answer.
+
 ## Checkpoint registry format
 
 ```yaml

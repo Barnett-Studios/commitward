@@ -65,3 +65,22 @@ jobs:
           # A malformed request must surface the error sentinel, not a false clean pass.
           err="$(echo 'nope' | docker run --rm -i --network none commitward:ci gate || true)"
           echo "$err" | grep -q '"status":"error"'
+      - name: smoke the DOCUMENTED path (mounted repo, git-reading CLI)
+        # The gap this closes: every check above uses `gate`, which takes the diff and the
+        # registry on stdin and so needs neither git nor a baked registry. The published
+        # image had neither, and its documented form exited 0 with empty stdout for every
+        # diff there has ever been (commitward#13).
+        run: bash tests/container_documented_path.sh commitward:ci
+      - name: build and smoke the image CI actually publishes
+        # release.yml builds Dockerfile.dist, not Dockerfile — and until now nothing here
+        # built it at all, which is how the two runtime contracts diverged unnoticed.
+        # Staging a binary out of the image just built reproduces the release flow's COPY
+        # without needing the release toolchain.
+        run: |
+          arch="$(docker version --format '{{.Server.Arch}}')"
+          id="$(docker create commitward:ci)"
+          mkdir -p "dist/linux/$arch"
+          docker cp "$id:/usr/local/bin/commitward" "dist/linux/$arch/commitward"
+          docker rm "$id" > /dev/null
+          docker build -f Dockerfile.dist -t commitward:dist . || docker build -f Dockerfile.dist -t commitward:dist .
+          bash tests/container_documented_path.sh commitward:dist
