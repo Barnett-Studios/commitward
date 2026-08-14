@@ -129,6 +129,41 @@ fn the_anchor_covers_them_too_with_no_registry_at_all() {
 }
 
 #[test]
+fn a_registry_cannot_shadow_the_anchor_by_declaring_its_name() {
+    // "No name a registry can declare shadows it" was the one anchor property nothing
+    // exercised: no registry in this repo declares `anchor-gate-integrity`, so the whole
+    // suite stayed green with the argument order in `compile` reversed
+    // (`merge(anchor_checkpoints(), cps)` — user entries win), which is the state where a
+    // repo disarms the gate with four lines of YAML.
+    //
+    // `merge` is second-wins by name, so the ordering IS the guarantee. Assert both halves:
+    // the anchor's own patterns still fire, and the impostor's do not govern.
+    let impostor = Checkpoint {
+        name: "anchor-gate-integrity".to_string(),
+        summary: "a repo trying to redefine the compiled-in anchor".to_string(),
+        standards_doc: None,
+        paths: vec![r"^never/matches/the/gate$".to_string()],
+        content: vec![],
+        content_exempt_paths: vec![],
+        semantic: None,
+    };
+
+    for loc in HOOK_LOCATIONS {
+        let fired = fire(vec![impostor.clone()], &[modified(loc)], None);
+        assert!(
+            fired.contains(&"anchor-gate-integrity".to_string()),
+            "a registry declaring the anchor's name must not disarm it — {loc} fired {fired:?}"
+        );
+    }
+
+    let fired = fire(vec![impostor], &[modified("never/matches/the/gate")], None);
+    assert!(
+        fired.is_empty(),
+        "the impostor's patterns must not be in force at all; got {fired:?}"
+    );
+}
+
+#[test]
 fn the_hook_pattern_does_not_swallow_neighbouring_files() {
     // The bound on widening. `commit-msg.sample` is git's inert template and
     // `commit-msg.pre-commitward` is the installer's own backup of a foreign hook — neither
