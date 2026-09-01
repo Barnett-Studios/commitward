@@ -143,3 +143,191 @@ fn a_fully_supplied_request_produces_no_warnings() {
     );
     assert_eq!(env["body"]["exit_class"], 0, "and still evaluate normally");
 }
+
+// ── commitward#20: the warnings cover the registry inputs, not the diff inputs ──────────
+//
+// `body.warnings` named the guards that could not run for the REGISTRY inputs and said
+// nothing about the DIFF inputs. Omit `diff` and every content-mode checkpoint is silently
+// inactive; omit `name_status` and every checkpoint of both modes is. Either way the
+// envelope was `status: "ok"`, `fired: []`, `exit_class: 0` — a clean pass for a change the
+// gate never saw.
+//
+// Same class as #4 (base registry) and #7 (parse error), on the one input dimension those
+// did not cover. Behaviour does not change here: `exit_class` stays what it was and the
+// gate stays fail-open. Only the reporting.
+
+/// One content-mode checkpoint and one path-mode, so a request can silence exactly one.
+const TWO_MODE_REGISTRY: &str = r#"
+version: "1"
+checkpoints:
+  - name: destructive-shell
+    summary: destructive shell command added
+    content:
+      - "rm -rf"
+  - name: touches-scripts
+    summary: touches a script
+    paths:
+      - "^scripts/"
+"#;
+
+const DEPLOY_DIFF: &str = "diff --git a/scripts/deploy.sh b/scripts/deploy.sh\n\
+--- a/scripts/deploy.sh\n\
++++ b/scripts/deploy.sh\n\
+@@ -1 +1,2 @@\n\
+ set -e\n\
++rm -rf /var/lib/data\n";
+
+fn warnings_of(v: &serde_json::Value) -> Vec<String> {
+    v["body"]["warnings"]
+        .as_array()
+        .map(|a| {
+            a.iter()
+                .filter_map(|w| w.as_str().map(String::from))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+#[test]
+fn the_control_fires_when_both_inputs_are_supplied() {
+    // Without this, everything below is satisfied by a gate that warns unconditionally.
+    let (_code, v) = gate(
+        &serde_json::json!({
+            "diff": DEPLOY_DIFF,
+            "name_status": "M\tscripts/deploy.sh",
+            "commit_msg": "chore: clean up",
+            "global_registry_yaml": TWO_MODE_REGISTRY,
+        })
+        .to_string(),
+    );
+    let fired: Vec<String> = v["body"]["fired"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|f| f["name"].as_str().unwrap_or_default().to_string())
+        .collect();
+    assert!(
+        fired.iter().any(|n| n == "destructive-shell"),
+        "the content checkpoint must fire when both inputs are present: {fired:?}"
+    );
+    let ws = warnings_of(&v);
+    assert!(
+        !ws.iter().any(|w| w.contains("content-mode")),
+        "no input was missing, so nothing should be warned about content mode: {ws:?}"
+    );
+}
+
+#[test]
+fn omitting_diff_warns_that_content_checkpoints_could_not_run() {
+    let (_code, v) = gate(
+        &serde_json::json!({
+            "name_status": "M\tscripts/deploy.sh",
+            "commit_msg": "chore: clean up",
+            "global_registry_yaml": TWO_MODE_REGISTRY,
+        })
+        .to_string(),
+    );
+    let ws = warnings_of(&v);
+    assert!(
+        ws.iter().any(|w| w.contains("destructive-shell")),
+        "a content-mode checkpoint that could not run must be NAMED, or the envelope reads \
+         as a partial evaluation that succeeded: {ws:?}"
+    );
+    // The path checkpoint COULD run — it must not be swept into the same warning.
+    assert!(
+        !ws.iter().any(|w| w.contains("touches-scripts")),
+        "the path checkpoint had its input and must not be reported as unable to run: {ws:?}"
+    );
+}
+
+#[test]
+fn omitting_name_status_warns_that_path_checkpoints_could_not_run() {
+    let (_code, v) = gate(
+        &serde_json::json!({
+            "diff": DEPLOY_DIFF,
+            "commit_msg": "chore: clean up",
+            "global_registry_yaml": TWO_MODE_REGISTRY,
+        })
+        .to_string(),
+    );
+    let ws = warnings_of(&v);
+    assert!(
+        ws.iter().any(|w| w.contains("touches-scripts")),
+        "a path-mode checkpoint that could not run must be named: {ws:?}"
+    );
+}
+
+#[test]
+fn a_request_carrying_no_change_at_all_says_there_was_nothing_to_evaluate() {
+    // The sharpest row in the report: a registry, a commit message, and no change —
+    // `exit_class: 0`, and the only warning was about the base registry. "Nothing to
+    // evaluate" is a different statement from "guard X could not run", and gets its own.
+    let (_code, v) = gate(
+        &serde_json::json!({
+            "commit_msg": "chore: clean up",
+            "global_registry_yaml": TWO_MODE_REGISTRY,
+        })
+        .to_string(),
+    );
+    let ws = warnings_of(&v);
+    assert!(
+        ws.iter().any(|w| w.contains("no change was supplied")),
+        "a request with neither diff nor name_status evaluated nothing, and must say so \
+         rather than report a clean pass: {ws:?}"
+    );
+}
+
+/// One content-mode checkpoint only, so omitting `diff` silences the whole registry —
+/// the exact row the report calls out.
+const CONTENT_ONLY_REGISTRY: &str = r#"
+version: "1"
+checkpoints:
+  - name: destructive-shell
+    summary: destructive shell command added
+    content:
+      - "rm -rf"
+"#;
+
+#[test]
+fn a_silenced_content_guard_still_reports_exit_class_0_but_no_longer_silently() {
+    // Fail-open is not in question and must not move: the verdict for this request was
+    // `exit_class: 0` before and stays `0`. What changes is that the envelope now says the
+    // guard could not run, so `0` can be read as "nothing fired" rather than mistaken for
+    // "nothing to worry about". Warnings are additive telemetry, not a new refusal.
+    let (code, v) = gate(
+        &serde_json::json!({
+            "name_status": "M\tscripts/deploy.sh",
+            "commit_msg": "chore: clean up",
+            "global_registry_yaml": CONTENT_ONLY_REGISTRY,
+        })
+        .to_string(),
+    );
+    assert_eq!(v["body"]["exit_class"], 0, "exit_class moved: {v}");
+    assert_eq!(code, 0, "process exit moved: {v}");
+    assert_eq!(v["status"], "ok", "status moved: {v}");
+    assert_eq!(
+        v["body"]["fired"].as_array().map(|a| a.len()),
+        Some(0),
+        "nothing can fire with no added lines: {v}"
+    );
+    assert!(
+        warnings_of(&v)
+            .iter()
+            .any(|w| w.contains("destructive-shell")),
+        "the silenced guard must be named: {v}"
+    );
+}
+
+#[test]
+fn a_vacuous_request_still_reports_exit_class_0_but_no_longer_silently() {
+    let (code, v) = gate(
+        &serde_json::json!({
+            "commit_msg": "chore: clean up",
+            "global_registry_yaml": CONTENT_ONLY_REGISTRY,
+        })
+        .to_string(),
+    );
+    assert_eq!(v["body"]["exit_class"], 0, "exit_class moved: {v}");
+    assert_eq!(code, 0, "process exit moved: {v}");
+    assert_eq!(v["status"], "ok", "status moved: {v}");
+}

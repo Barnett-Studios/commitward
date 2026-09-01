@@ -14,7 +14,7 @@ use commitward::gitdiff::{parse_added_lines, parse_name_status};
 use commitward::{
     checkpoint_removed_is_compiled, compile, detect, detect_with_registry_paths, exit_class,
     extract_acks, extract_checkpoint_names, load_checkpoints, merge, partition_ack, Checkpoint,
-    FileEntry,
+    FileEntry, Mode,
 };
 use serde::Deserialize;
 
@@ -170,6 +170,62 @@ fn gate_envelope(input: &str) -> Result<String, String> {
              deleted in this change will not be detected"
                 .to_string(),
         );
+    }
+
+    // commitward#20: the warnings above cover the REGISTRY inputs and said nothing about the
+    // DIFF inputs. Omitting `diff` silenced every content-mode checkpoint, and omitting
+    // `name_status` silenced every checkpoint of both modes, while the envelope still read
+    // `status: "ok"`, `fired: []`, `exit_class: 0` — a clean pass for a change the gate never
+    // saw. Same class as #4 (base registry) and #7 (parse error), on the one input dimension
+    // those did not cover.
+    //
+    // The absent/empty distinction is not recoverable from the request (`String` +
+    // `serde(default)`) and does not need to be: the actionable condition is observable after
+    // compile — a checkpoint of a given mode is present and the input that mode reads is
+    // empty. Behaviour does not change here. `exit_class` and the fail-open posture are
+    // untouched; only the reporting is.
+    //
+    // Names, not a count: "1 guard could not run" sends the reader back to the registry to
+    // work out which one. The compiled-in anchor is not excluded — it is a real checkpoint
+    // and it is silenced by exactly the same omission.
+    let names_of = |pred: fn(&Mode) -> bool| -> Vec<&str> {
+        compiled
+            .iter()
+            .filter(|c| pred(&c.mode))
+            .map(|c| c.name.as_str())
+            .collect()
+    };
+    if files.is_empty() && added.is_empty() {
+        // Distinct from "guard X could not run": nothing was evaluated at all. A request
+        // carrying a registry and a commit message but no change returned `exit_class: 0`,
+        // and the only warning was about the base registry.
+        warnings.push(
+            "no change was supplied (diff / name_status both absent or empty) — NOTHING was \
+             evaluated, so this result reports that no checkpoint fired against an empty \
+             change, not that the change is clean"
+                .to_string(),
+        );
+    } else {
+        if added.is_empty() {
+            let n = names_of(|m| matches!(m, Mode::Content { .. }));
+            if !n.is_empty() {
+                warnings.push(format!(
+                    "no added lines were supplied (`diff` absent or empty) — these \
+                     content-mode checkpoint(s) could NOT run and cannot fire: {}",
+                    n.join(", ")
+                ));
+            }
+        }
+        if files.is_empty() {
+            let n = names_of(|m| matches!(m, Mode::Path(_)));
+            if !n.is_empty() {
+                warnings.push(format!(
+                    "no changed paths were supplied (`name_status` absent or empty) — these \
+                     path-mode checkpoint(s) could NOT run and cannot fire: {}",
+                    n.join(", ")
+                ));
+            }
+        }
     }
 
     let unacked_names: Vec<&str> = unacked.iter().map(|f| f.name.as_str()).collect();
