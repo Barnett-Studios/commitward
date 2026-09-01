@@ -14,7 +14,7 @@ use commitward::gitdiff::{parse_added_lines, parse_name_status};
 use commitward::{
     checkpoint_removed_is_compiled, compile, detect, detect_with_registry_paths, exit_class,
     extract_acks, extract_checkpoint_names, load_checkpoints, merge, partition_ack, Checkpoint,
-    FileEntry,
+    FileEntry, Mode, SemanticKind,
 };
 use serde::Deserialize;
 
@@ -170,6 +170,97 @@ fn gate_envelope(input: &str) -> Result<String, String> {
              deleted in this change will not be detected"
                 .to_string(),
         );
+    }
+
+    // commitward#20: the warnings above cover the REGISTRY inputs and said nothing about the
+    // DIFF inputs. Omitting `diff` silenced every content-mode checkpoint, and omitting
+    // `name_status` silenced every checkpoint of both modes, while the envelope still read
+    // `status: "ok"`, `fired: []`, `exit_class: 0` — a clean pass for a change the gate never
+    // saw. Same class as #4 (base registry) and #7 (parse error), on the one input dimension
+    // those did not cover.
+    //
+    // The absent/empty distinction is not recoverable from the request (`String` +
+    // `serde(default)`) and does not need to be: the actionable condition is observable after
+    // compile — a checkpoint of a given mode is present and the input that mode reads is
+    // empty. Behaviour does not change here. `exit_class` and the fail-open posture are
+    // untouched; only the reporting is.
+    //
+    // Names, not a count: "1 guard could not run" sends the reader back to the registry to
+    // work out which one. The compiled-in anchor is not excluded — it is a real checkpoint
+    // and it is silenced by exactly the same omission.
+    //
+    // And the set is derived from the inputs each mode actually CONSUMES, not from the
+    // request field that shares the mode's name. The first version of this warning paired
+    // `diff`→content and `name_status`→path, which is what the field names suggest and not
+    // what the evaluator does: `Mode::Content` iterates `files` and only then looks up the
+    // added lines, so an empty `name_status` silences it as surely as an empty `diff`, and
+    // `Semantic(CheckpointRemoved)` reads `files` too (via `has_registry_touch`) and was in
+    // neither list. A request carrying `diff` and no `name_status` therefore got a warning
+    // that named a DIFFERENT checkpoint than the one silenced — a list authoritative enough
+    // to be trusted, and wrong.
+    //
+    // Exhaustive match, no wildcard: a new `Mode` variant is a compile error here rather
+    // than a checkpoint that is silently absent from every warning.
+    /// Which request input is missing, for a checkpoint that cannot run without it.
+    enum Missing {
+        Paths,
+        Added,
+    }
+    fn silenced_by(mode: &Mode, no_paths: bool, no_added: bool) -> Option<Missing> {
+        match mode {
+            Mode::Path(_) | Mode::Semantic(SemanticKind::CheckpointRemoved) => {
+                no_paths.then_some(Missing::Paths)
+            }
+            // Paths first: with no changed files the content patterns are never reached, so
+            // that is the input to report as missing.
+            Mode::Content { .. } => {
+                if no_paths {
+                    Some(Missing::Paths)
+                } else if no_added {
+                    Some(Missing::Added)
+                } else {
+                    None
+                }
+            }
+        }
+    }
+    if files.is_empty() && added.is_empty() {
+        // Distinct from "guard X could not run": nothing was evaluated at all. A request
+        // carrying a registry and a commit message but no change returned `exit_class: 0`,
+        // and the only warning was about the base registry.
+        warnings.push(
+            "no change was supplied (diff / name_status both absent or empty) — NOTHING was \
+             evaluated, so this result reports that no checkpoint fired against an empty \
+             change, not that the change is clean"
+                .to_string(),
+        );
+    } else {
+        let mut by_paths: Vec<&str> = Vec::new();
+        let mut by_added: Vec<&str> = Vec::new();
+        for c in &compiled {
+            match silenced_by(&c.mode, files.is_empty(), added.is_empty()) {
+                Some(Missing::Paths) => by_paths.push(c.name.as_str()),
+                Some(Missing::Added) => by_added.push(c.name.as_str()),
+                None => {}
+            }
+        }
+        if !by_paths.is_empty() {
+            warnings.push(format!(
+                "no changed paths were supplied (`name_status` absent or empty) — these \
+                 checkpoint(s) could NOT run and cannot fire: {}",
+                by_paths.join(", ")
+            ));
+        }
+        if !by_added.is_empty() {
+            // Not "`diff` absent or empty": a binary-only change carries a `diff` that is
+            // neither, with no added lines in it. What silences these is the absence of
+            // added lines, which is what the sentence now says.
+            warnings.push(format!(
+                "the change carried no added lines (`diff` has none) — these content-mode \
+                 checkpoint(s) could NOT run and cannot fire: {}",
+                by_added.join(", ")
+            ));
+        }
     }
 
     let unacked_names: Vec<&str> = unacked.iter().map(|f| f.name.as_str()).collect();
