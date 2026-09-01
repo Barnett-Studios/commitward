@@ -241,7 +241,13 @@ fn omitting_diff_warns_that_content_checkpoints_could_not_run() {
 }
 
 #[test]
-fn omitting_name_status_warns_that_path_checkpoints_could_not_run() {
+fn omitting_name_status_warns_that_every_checkpoint_could_not_run() {
+    // Both modes, not just the one whose name matches the missing field. `Mode::Content`
+    // iterates `files` and only then looks up the added lines, so an empty `name_status`
+    // silences it too — and the first version of this warning named `touches-scripts` only,
+    // while `destructive-shell` sat silenced beside it with `+rm -rf /var/lib/data` in the
+    // diff. A reader given a list of what could not run reasonably concludes that whatever
+    // is NOT on it ran; that is a cleaner-looking clean pass than no list at all.
     let (_code, v) = gate(
         &serde_json::json!({
             "diff": DEPLOY_DIFF,
@@ -254,6 +260,51 @@ fn omitting_name_status_warns_that_path_checkpoints_could_not_run() {
     assert!(
         ws.iter().any(|w| w.contains("touches-scripts")),
         "a path-mode checkpoint that could not run must be named: {ws:?}"
+    );
+    assert!(
+        ws.iter().any(|w| w.contains("destructive-shell")),
+        "a content-mode checkpoint is silenced by an empty name_status just as surely — it \
+         iterates the changed files before it looks at any added line — and must be named: \
+         {ws:?}"
+    );
+}
+
+/// A registry whose only checkpoint is the semantic one, so `name_status` decides on its own
+/// whether anything at all could run.
+const SEMANTIC_ONLY_REGISTRY: &str = r#"
+version: "1"
+checkpoints:
+  - name: checkpoint-removed
+    summary: a checkpoint was deleted from the registry
+    semantic: checkpoint_removed
+"#;
+
+#[test]
+fn omitting_name_status_names_the_silenced_checkpoint_removed_guard_too() {
+    // The second instance of the same cause. `Semantic(CheckpointRemoved)` reads `files`
+    // (via `has_registry_touch`) and belonged to neither the content list nor the path list,
+    // so it was silenced with nothing saying so. The base registry IS supplied here, so the
+    // pre-existing "no base registry" warning cannot be what satisfies this.
+    let (_code, v) = gate(
+        &serde_json::json!({
+            "diff": DEPLOY_DIFF,
+            "commit_msg": "chore: clean up",
+            "global_registry_yaml": SEMANTIC_ONLY_REGISTRY,
+            "base_global_registry_yaml": SEMANTIC_ONLY_REGISTRY,
+        })
+        .to_string(),
+    );
+    let ws = warnings_of(&v);
+    assert!(
+        !ws.iter().any(|w| w.contains("no base registry supplied")),
+        "the base registry is supplied, so that warning must not be what makes this pass: \
+         {ws:?}"
+    );
+    assert!(
+        ws.iter()
+            .any(|w| w.contains("could NOT run") && w.contains("checkpoint-removed")),
+        "the checkpoint-removed guard cannot run without changed paths, and must be named: \
+         {ws:?}"
     );
 }
 

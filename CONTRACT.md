@@ -26,14 +26,21 @@ must never be reported as a check that passed. Concretely (commitward#7):
   configuration choice, supplying something unparseable is a defect.
 - Every `ok` envelope carries `body.warnings`, naming the guards that could not run — for the
   **change** inputs as well as the registry ones (commitward#20). A request that omits `diff`
-  cannot fire any content-mode checkpoint, and one that omits `name_status` cannot fire any
-  path-mode checkpoint; both used to return `fired: []`, `exit_class: 0` and warn only about the
+  cannot fire any content-mode checkpoint, and one that omits `name_status` cannot fire **any
+  checkpoint at all** — content and semantic modes both read the changed-file list before they
+  read anything else. Both used to return `fired: []`, `exit_class: 0` and warn only about the
   registry, which is a clean pass for a change the gate never saw. A request carrying neither
   gets its own line, because "nothing was evaluated" is a different statement from "guard X could
-  not run". The checkpoints are **named**, not counted, and — following the `checkpoint_removed`
-  precedent below — the warning is conditional on a checkpoint of that mode actually being
-  compiled, so a registry that declares no content checkpoints is not warned about `diff`.
-  Behaviour is unchanged: `exit_class` and the fail-open posture are exactly what they were.
+  not run".
+
+  Each warning names the checkpoints the **missing input** actually silences, derived from what
+  each mode consumes rather than from the request field that shares the mode's name. The first
+  implementation paired `diff`↔content and `name_status`↔path, so a request with `diff` and no
+  `name_status` named one silenced checkpoint while omitting another that was equally silenced —
+  a list authoritative enough to be trusted, and wrong. The checkpoints are **named**, not
+  counted, and the warning is conditional on such a checkpoint actually being compiled, so a
+  registry that declares no content checkpoints is not warned about added lines. Behaviour is
+  unchanged: `exit_class` and the fail-open posture are exactly what they were.
 
 **The default registry carries self-protection, with a documented residual.** The shipped
 `checkpoints.yaml` carries `gate-self-mod` (path) and `checkpoint-removed` (semantic), so removing
