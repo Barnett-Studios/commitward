@@ -24,21 +24,35 @@ must sign off on a narrow set of high-stakes changes.
 
 ## Install
 
-**As a git hook (most common):**
+**1. Install the binary — the hook calls it, and is fail-open without it:**
 
 ```sh
-# from your repo, install a commit-msg hook that runs commitward
-./install-hook.sh
+brew tap Barnett-Studios/tap && brew install commitward
+# or
+cargo install commitward
 ```
 
-The hook is fail-open and disables with `COMMITWARD_HITL=off`. If your repo uses a global
-`core.hooksPath`, the installer warns and tells you how to target that directory instead.
-
-**As a CLI:**
+**2. Install the git hook (the most common way to use it):**
 
 ```sh
-brew tap Barnett-Studios/tap && brew install commitward   # macOS/Linux
-cargo install commitward                                   # any platform
+# invoke the installer FROM the repo you are installing into. It ships in the crate
+# (commitward-<version>/install-hook.sh) and in this repo — `cargo install` places only
+# the binary on PATH, so run it by path from a checkout:
+/path/to/commitward/install-hook.sh
+```
+
+The order matters. The hook is **fail-open by design** — a missing binary, a git error or an
+unreadable registry all allow the commit — so a hook installed before the binary exists
+allows *every* commit while looking installed. The installer says so when it happens, and
+also when it has replaced a pre-existing `commit-msg` hook (backed up once to
+`commit-msg.pre-commitward`, which is **not** chained and will no longer run). Disable the
+hook at any time with `COMMITWARD_HITL=off`. If your repo's `core.hooksPath` points
+somewhere other than the directory being installed into, the installer warns and names that
+directory.
+
+**The CLI, for the same binary used directly (no hook needed):**
+
+```sh
 commitward --base origin/main --format markdown
 ```
 
