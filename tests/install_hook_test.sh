@@ -45,6 +45,67 @@ grep -q "managed-by: commitward" "$r2/.git/hooks/commit-msg" || fail "commitward
 ( cd "$r2" && bash "$installer" >/dev/null )
 grep -q "foreign" "$backup" || fail "backup clobbered on re-run"
 
+# ── Case 3b: the SECOND foreign hook is kept too (commitward#31) ───────────
+# The old guard was `[ -e "$hook.pre-commitward" ] || cp …`, so once a backup existed the
+# copy was skipped — while `replaced_foreign` was still set, the hook still overwritten, and
+# the run still reported success naming a backup path that held the FIRST hook. `.git/hooks/`
+# is not under version control, so a hand-written second hook was simply gone.
+#
+# Reached by any ordinary sequence where something writes `commit-msg` after commitward has
+# been installed once and the installer is re-run — husky, pre-commit, lefthook, or a person.
+r2b="$root/foreign-twice"; mkdir -p "$r2b"; ( cd "$r2b" && git init -q )
+mkdir -p "$r2b/.git/hooks"
+h2b="$r2b/.git/hooks/commit-msg"
+
+printf '#!/bin/sh\n# FIRSTHOOK\ngrep -q "TICKET-" "$1" || exit 1\n' > "$h2b"
+chmod +x "$h2b"
+( cd "$r2b" && bash "$installer" >/dev/null 2>&1 )
+grep -q "FIRSTHOOK" "$h2b.pre-commitward" || fail "3b: first foreign hook not backed up"
+
+printf '#!/bin/sh\n# SECONDHOOK\ngrep -q "JIRA-" "$1" || exit 1\n' > "$h2b"
+chmod +x "$h2b"
+out3b="$( cd "$r2b" && bash "$installer" 2>&1 )"
+
+# The content must survive SOMEWHERE under the repo — the assertion is about not destroying
+# it, not about the name, so a different rotation scheme still passes.
+if ! grep -rq "SECONDHOOK" "$r2b"; then
+  fail "3b: the second foreign hook was destroyed with no copy kept"
+fi
+# The first must still be there too: rotating must not mean overwriting.
+grep -rq "FIRSTHOOK" "$r2b" || fail "3b: rotating the backup destroyed the first hook"
+
+# And the message must name the path that actually holds the hook just replaced. Naming a
+# path that holds someone else's hook is the one thing that stops an operator noticing.
+named="$(printf '%s\n' "$out3b" | sed -n 's/^commitward: \(.*commit-msg\.pre-commitward[^ ]*\).*/\1/p' | head -1)"
+[ -n "$named" ] || fail "3b: the installer named no backup path for the replaced hook"
+# The installer names the path as the operator would use it — relative to the repo they ran
+# it in — so resolve it against that repo before reading it.
+case "$named" in /*) named_abs="$named" ;; *) named_abs="$r2b/$named" ;; esac
+grep -q "SECONDHOOK" "$named_abs" \
+  || fail "3b: the message names $named, which does not hold the hook just replaced"
+
+# A THIRD foreign hook must be kept too. A fixed second name (`.1`) passes everything above
+# while clobbering the second hook's backup on the third install — found by mutation, not by
+# reasoning about it.
+printf '#!/bin/sh\n# THIRDHOOK\ngrep -q "OPS-" "$1" || exit 1\n' > "$h2b"
+chmod +x "$h2b"
+( cd "$r2b" && bash "$installer" >/dev/null 2>&1 )
+for want in FIRSTHOOK SECONDHOOK THIRDHOOK; do
+  grep -rq "$want" "$r2b" || fail "3b: $want was destroyed by a later install"
+done
+
+# CONTROL — the message on the FIRST replacement still names a file holding that hook, so
+# this is not satisfied by an installer that reports nothing at all.
+named1="$(printf '%s\n' "$( cd "$root" && true )" )"
+r2c="$root/foreign-once"; mkdir -p "$r2c"; ( cd "$r2c" && git init -q )
+mkdir -p "$r2c/.git/hooks"
+printf '#!/bin/sh\n# ONLYHOOK\n' > "$r2c/.git/hooks/commit-msg"; chmod +x "$r2c/.git/hooks/commit-msg"
+out3c="$( cd "$r2c" && bash "$installer" 2>&1 )"
+named1="$(printf '%s\n' "$out3c" | sed -n 's/^commitward: \(.*commit-msg\.pre-commitward[^ ]*\).*/\1/p' | head -1)"
+[ -n "$named1" ] || fail "3b control: no backup path named on the first replacement"
+case "$named1" in /*) named1_abs="$named1" ;; *) named1_abs="$r2c/$named1" ;; esac
+grep -q "ONLYHOOK" "$named1_abs" || fail "3b control: first-replacement message names the wrong file"
+
 # ── Case 4: the binary is absent → say so, and still exit 0 ────────────────
 # commitward#23. The README's first and self-described "most common" install is the hook
 # form; the binary is installed in the NEXT section, framed as a different way to use the

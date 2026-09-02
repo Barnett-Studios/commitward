@@ -44,8 +44,8 @@ cargo install commitward
 The order matters. The hook is **fail-open by design** — a missing binary, a git error or an
 unreadable registry all allow the commit — so a hook installed before the binary exists
 allows *every* commit while looking installed. The installer says so when it happens, and
-also when it has replaced a pre-existing `commit-msg` hook (backed up once to
-`commit-msg.pre-commitward`, which is **not** chained and will no longer run). Disable the
+also when it has replaced a pre-existing `commit-msg` hook (backed up to
+`commit-msg.pre-commitward`, which is **not** chained and will no longer run; a second foreign hook backs up to `commit-msg.pre-commitward.1`, a third to `.2`, and the installer names on stderr the file it actually wrote). Disable the
 hook at any time with `COMMITWARD_HITL=off`. If your repo's `core.hooksPath` points
 somewhere other than the directory being installed into, the installer warns and names that
 directory.

@@ -2,8 +2,9 @@
 # install-hook.sh — install the commitward commit-msg hook into a git repo.
 #
 # Idempotent: re-running is a no-op (the hook is rewritten to the same bytes).
-# Safe: a pre-existing FOREIGN commit-msg hook is backed up once to
-# `commit-msg.pre-commitward` before being replaced.
+# Safe: EVERY pre-existing FOREIGN commit-msg hook is backed up before being replaced —
+# to `commit-msg.pre-commitward`, or to `commit-msg.pre-commitward.<n>` when that name is
+# taken. The message names the file actually written.
 #
 # Hooks dir resolution (in order): first positional arg, then $COMMITWARD_HOOKS_DIR,
 # then the repo-local hooks dir `$(git rev-parse --git-dir)/hooks`. It deliberately
@@ -49,11 +50,34 @@ if [ "$warn_hooks_path" = 1 ]; then
     fi
 fi
 
-# Back up a pre-existing foreign hook once (never overwrite our own marker file,
-# never clobber an existing backup).
+# Back up EVERY pre-existing foreign hook (never our own marker file, and never over an
+# existing backup — rotate instead).
+#
+# This used to be `[ -e "$hook.pre-commitward" ] || cp …`, which skipped the copy once a
+# backup existed while still setting `replaced_foreign`, still overwriting the hook, and
+# still reporting success. So the SECOND foreign hook the installer ever replaced in a repo
+# was destroyed with no copy kept, and the message named a path holding the FIRST one —
+# the single thing that would have stopped the operator noticing (commitward#31).
+#
+# `.git/hooks/` is not under version control. There is nothing to recover it from.
+#
+# Reached by any ordinary sequence where something writes `commit-msg` after commitward has
+# been installed once and the installer is re-run: husky, pre-commit, lefthook, commitlint,
+# or a person.
 replaced_foreign=0
+backup=""
 if [ -e "$hook" ] && ! grep -q "$MARKER" "$hook" 2>/dev/null; then
-    [ -e "$hook.pre-commitward" ] || cp "$hook" "$hook.pre-commitward"
+    backup="$hook.pre-commitward"
+    if [ -e "$backup" ]; then
+        # Rotate rather than refuse: an installer that stops working because a backup exists
+        # is one people work around with `rm`, which is the loss this prevents.
+        n=1
+        while [ -e "$hook.pre-commitward.$n" ]; do
+            n=$((n + 1))
+        done
+        backup="$hook.pre-commitward.$n"
+    fi
+    cp "$hook" "$backup"
     replaced_foreign=1
 fi
 
@@ -89,8 +113,10 @@ echo "commitward: installed commit-msg hook at $hook"
 # hook is its own hazard and is deliberately not done; what is not deliberate is the
 # operator finding out from a dot-file in .git/hooks.
 if [ "$replaced_foreign" = 1 ]; then
+    # `$backup`, not a hard-coded `.pre-commitward`: after a rotation those are different
+    # files, and naming the wrong one is worse than naming none.
     echo "commitward: replaced an existing commit-msg hook; the previous one is saved at" >&2
-    echo "commitward: $hook.pre-commitward and will NO LONGER RUN — re-wire it yourself if" >&2
+    echo "commitward: $backup and will NO LONGER RUN — re-wire it yourself if" >&2
     echo "commitward: its policy still applies" >&2
 fi
 
