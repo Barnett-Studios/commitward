@@ -59,6 +59,11 @@ const PATHS: &[&str] = &[
     "sub/back\\slash.sh",
     "sub/trail .sh",
     "sub/endswithspace ",
+    // commitward#26: BOTH triggers at once. Each of the six above exercises exactly one —
+    // quoting (`"`, `\`, control char) or the space that makes git append its tab — and the
+    // combination is the case none of them reach.
+    "sub/sp ace\"and.sh",
+    "sub/sp ace\\and.sh",
 ];
 
 #[test]
@@ -134,4 +139,69 @@ fn a_denylisted_line_in_a_quoted_path_fires_the_content_checkpoint() {
         Some(0),
         "and an unacknowledged fire must not exit 0"
     );
+}
+
+/// The eight-path run above still exits 2 when this path is dropped, because the other seven
+/// fire — so it cannot show the consequence. This one stages the space-plus-quote path as the
+/// ONLY file with added lines, which is the shape the issue measured at `exit 0`: a clean pass
+/// for a commit whose sole change is `rm -rf /`.
+#[test]
+fn the_space_and_quote_path_alone_still_exits_2() {
+    for (i, (label, path, want_exit)) in [
+        // CONTROL first, so a harness that fires on nothing is visible.
+        ("control", "sub/ordinary.sh", 2),
+        ("subject", "sub/sp ace\"and.sh", 2),
+        ("subject", "sub/sp ace\\and.sh", 2),
+    ]
+    .iter()
+    .enumerate()
+    {
+        // Indexed, not keyed on the path: the two subject paths are the SAME LENGTH and
+        // `path.len()` collided them into one directory.
+        let dir = std::env::temp_dir().join(format!("commitward-alone-{}-{i}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("sub")).expect("mkdir");
+        let repo = TempRepo { dir };
+        let d = &repo.dir;
+
+        assert!(git(d, &["init"]).status.success(), "git init");
+        std::fs::write(d.join("README.md"), "seed\n").expect("seed");
+        std::fs::write(d.join("gates.yaml"), CONTENT_REGISTRY).expect("registry");
+        git(d, &["add", "README.md", "gates.yaml"]);
+        assert!(git(d, &["commit", "-m", "seed"]).status.success(), "seed");
+        let base = String::from_utf8(git(d, &["rev-parse", "HEAD"]).stdout)
+            .expect("utf8")
+            .trim()
+            .to_string();
+
+        std::fs::write(d.join(path), "#!/bin/sh\nrm -rf /\n")
+            .unwrap_or_else(|e| panic!("write {path}: {e}"));
+        git(d, &["add", "-A"]);
+        assert!(
+            git(d, &["commit", "-m", "one file"]).status.success(),
+            "commit"
+        );
+
+        let out = Command::new(BIN)
+            .current_dir(d)
+            .args([
+                "--base",
+                &base,
+                "--registry",
+                d.join("gates.yaml").to_str().expect("utf8 path"),
+                "--repo-registry",
+                "/nonexistent/repo.yaml",
+                "--format",
+                "json",
+            ])
+            .output()
+            .expect("commitward runs");
+
+        assert_eq!(
+            out.status.code(),
+            Some(*want_exit),
+            "{label} {path:?}: a commit adding `rm -rf /` must not pass; stdout was {}",
+            String::from_utf8_lossy(&out.stdout)
+        );
+    }
 }

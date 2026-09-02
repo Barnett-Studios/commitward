@@ -158,11 +158,23 @@ pub fn parse_name_status(out: &str) -> Vec<FileEntry> {
 /// unambiguously git's delimiter.
 fn header_path(line: &str) -> Option<String> {
     let rest = line.strip_prefix("+++ ")?;
+    // BEFORE the quote check, not inside the unquoted branch (commitward#26). The two things
+    // that shape this header are independent: git quotes on `"`, `\` or a control character,
+    // and appends the tab delimiter when the path contains a SPACE. A path with both produces
+    // `+++ "b/…"\t`, where the tab sits OUTSIDE the closing quote — and `unquote_c_style`
+    // returns its input unchanged unless the LAST byte is `"`, so the string came back still
+    // quoted, `strip_prefix("b/")` failed on the leading quote, and every following `+` line
+    // was discarded. A commit whose only change was `rm -rf /` in such a file exited 0.
+    //
+    // Stripping it here is safe for the quoted form for the same reason the doc above gives
+    // for the unquoted one: a path containing a literal tab is C-quoted, so that tab appears
+    // as the two characters `\t` INSIDE the quotes and the closing `"` is the last byte of
+    // the path's own text. A trailing raw tab is therefore always git's delimiter.
+    let rest = rest.strip_suffix('\t').unwrap_or(rest);
     if rest.starts_with('"') {
         let unquoted = unquote_c_style(rest);
         return unquoted.strip_prefix("b/").map(str::to_string);
     }
-    let rest = rest.strip_suffix('\t').unwrap_or(rest);
     rest.strip_prefix("b/").map(str::to_string)
 }
 
