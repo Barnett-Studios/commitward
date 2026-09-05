@@ -208,3 +208,78 @@ fn a_plus_plus_plus_line_inside_a_hunk_is_still_content_not_a_header() {
     );
     assert!(!added.contains_key("evil.sh"), "and no header was believed");
 }
+
+// ── commitward#26 — quoted path AND trailing tab ────────────────────────────
+//
+// The two triggers are independent and the suite never combined them. Quoting fires on `"`,
+// `\` or a control character; the tab delimiter is appended when the path contains a SPACE.
+// A path with both produces `+++ "b/…"\t`, where the tab sits OUTSIDE the closing quote —
+// so `unquote_c_style` (which returns its input unchanged unless the LAST byte is `"`) hands
+// back a still-quoted string, `strip_prefix("b/")` fails on the leading quote, and every
+// following `+` line is discarded with `current_file = None`.
+//
+// The consequence is not a parse detail: a commit whose only change is `rm -rf /` in such a
+// file exits 0 from the content gate.
+
+/// Both real headers, exactly as git emits them (captured from a real repo in the issue,
+/// under both `core.quotePath` settings — identical output).
+const QUOTED_WITH_TAB: &[(&str, &str)] = &[
+    ("+++ \"b/sub/sp ace\\\"and.sh\"\t", "sub/sp ace\"and.sh"),
+    ("+++ \"b/sub/sp ace\\\\and.sh\"\t", "sub/sp ace\\and.sh"),
+];
+
+#[test]
+fn a_quoted_header_with_gits_trailing_tab_still_yields_its_path() {
+    for (header, want) in QUOTED_WITH_TAB {
+        let diff = format!("{header}\n@@ -0,0 +1 @@\n+rm -rf /\n");
+        let got = parse_added_lines(&diff);
+        assert!(
+            got.contains_key(*want),
+            "header {header:?} must key as {want:?}; parsed keys were {:?}",
+            got.keys().collect::<Vec<_>>()
+        );
+        assert_eq!(
+            got[*want],
+            vec!["rm -rf /".to_string()],
+            "the added line must reach the content gate for {want:?}"
+        );
+    }
+}
+
+/// The control that makes the test above about the CODE and not the fixture. Each trigger
+/// ALONE already worked (commitward#15 closed those), so if these regress the failure is
+/// something other than the space-plus-quote combination.
+#[test]
+fn control_each_trigger_alone_still_yields_its_path() {
+    let cases: &[(&str, &str)] = &[
+        // quoted, no space -> no trailing tab
+        ("+++ \"b/sub/quote\\\".sh\"", "sub/quote\".sh"),
+        ("+++ \"b/sub/back\\\\slash.sh\"", "sub/back\\slash.sh"),
+        // space, no quote trigger -> trailing tab, unquoted
+        ("+++ b/sub/trail .sh\t", "sub/trail .sh"),
+        // neither
+        ("+++ b/sub/plain.sh", "sub/plain.sh"),
+    ];
+    for (header, want) in cases {
+        let diff = format!("{header}\n@@ -0,0 +1 @@\n+rm -rf /\n");
+        let got = parse_added_lines(&diff);
+        assert!(
+            got.contains_key(*want),
+            "control regressed: {header:?} must key as {want:?}; got {:?}",
+            got.keys().collect::<Vec<_>>()
+        );
+    }
+}
+
+/// A trailing space belongs to the PATH, not to git. `trim_end()` here would eat it and
+/// desync this parser's key from `parse_name_status`'s — the failure the module doc warns
+/// about — so exactly one `\t` is stripped and nothing else.
+#[test]
+fn a_path_ending_in_a_space_keeps_it_after_the_tab_is_stripped() {
+    let got = parse_added_lines("+++ b/sub/endswithspace \t\n@@ -0,0 +1 @@\n+rm -rf /\n");
+    assert!(
+        got.contains_key("sub/endswithspace "),
+        "the trailing space is part of the path: {:?}",
+        got.keys().collect::<Vec<_>>()
+    );
+}
