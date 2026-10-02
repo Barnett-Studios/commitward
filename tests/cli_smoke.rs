@@ -148,6 +148,44 @@ fn fail_open_exit_0_when_registries_absent() {
     );
 }
 
+/// commitward#30: `cargo install` places only the binary — nothing puts
+/// `checkpoints.yaml` beside it, which is `default_registry()`'s resolution when
+/// neither `--registry` nor `$COMMITWARD_REGISTRY` is given. Unlike
+/// `fail_open_exit_0_when_registries_absent` above, this test supplies NEITHER flag
+/// nor env var, so `default_registry()` runs for real — and resolves beside
+/// `CARGO_BIN_EXE_commitward`, a `target/debug` directory that has no
+/// `checkpoints.yaml` next to it either. This is the exact gap the issue measured on
+/// the published crate: the documented install leaves every shipped checkpoint
+/// inactive.
+#[test]
+fn the_documented_cargo_install_route_still_enforces_the_shipped_baseline() {
+    let (repo, base) = setup("cargo-install-route");
+    let d = &repo.dir;
+    // The README's own worked example: editing CLAUDE.md, guarded by the shipped
+    // `agent-instructions-self-mod` checkpoint.
+    std::fs::write(d.join("CLAUDE.md"), "y\n").unwrap();
+    git(d, &["add", "CLAUDE.md"]);
+    assert!(
+        git(d, &["commit", "-m", "edit CLAUDE.md"]).status.success(),
+        "CLAUDE.md commit"
+    );
+    let msg = d.join("msg.txt");
+    std::fs::write(&msg, "edit CLAUDE.md\n").unwrap(); // no HITL-ACK
+    let out = Command::new(BIN)
+        .current_dir(d)
+        .env_remove("COMMITWARD_REGISTRY")
+        .args(["--base", &base, "--commit-msg-file", msg.to_str().unwrap()])
+        .output()
+        .expect("commitward binary runs");
+    assert_eq!(
+        out.status.code(),
+        Some(2),
+        "the shipped agent-instructions-self-mod checkpoint must fire on the documented \
+         cargo-install route, with no --registry and no $COMMITWARD_REGISTRY; stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
 #[test]
 fn ack_trailer_lifts_the_block_to_exit_1() {
     // Exit-code contract: 0 = nothing fired, 1 = fired+all-acked (allowed to

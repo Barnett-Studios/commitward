@@ -13,10 +13,22 @@ use std::process::Command;
 use commitward::gitdiff::{parse_added_lines, parse_name_status};
 use commitward::{
     checkpoint_removed_is_compiled, compile, detect, detect_with_registry_paths, exit_class,
-    extract_acks, extract_checkpoint_names, load_checkpoints, merge, partition_ack, Checkpoint,
-    FileEntry, Mode, SemanticKind,
+    extract_acks, extract_checkpoint_names, load_checkpoints, merge, parse_checkpoints,
+    partition_ack, Checkpoint, FileEntry, Mode, SemanticKind,
 };
 use serde::Deserialize;
+
+/// The registry this crate ships (`checkpoints.yaml` at the repo root), embedded at
+/// build time. `cargo install` places only the `[[bin]]` target — nothing puts this
+/// file beside the installed binary, so `default_registry()`'s resolution is
+/// unreachable on that route and every shipped checkpoint went inactive (commitward#30).
+/// `include_str!` bakes the content in regardless of install method, as a FALLBACK
+/// used only when nothing more specific was asked for: an explicit `--registry` or
+/// `$COMMITWARD_REGISTRY` that points at a missing file still fails open with the old
+/// warning, exactly as before — this only covers the case where neither was given and
+/// the default path (beside the binary) doesn't exist either.
+const SHIPPED_REGISTRY: &str =
+    include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/checkpoints.yaml"));
 
 const USAGE: &str = "\
 commitward — deterministic fail-open HITL commit gate
@@ -29,7 +41,8 @@ OPTIONS:
     --cached                  Diff the staged index against HEAD instead of a base ref
     --commit-msg-file <path>  File holding the commit message to scan for HITL-ACK trailers
     --registry <path>         Global checkpoint baseline (default: $COMMITWARD_REGISTRY,
-                              else checkpoints.yaml next to the binary)
+                              else checkpoints.yaml next to the binary, else the
+                              compiled-in shipped baseline if neither is reachable)
     --repo-registry <path>    Repo-local checkpoint overrides (default: .commitward/checkpoints.yaml)
     --format <text|json|markdown>   Output format (default: text)
     -h, --help                Print this help
@@ -409,23 +422,47 @@ fn run() -> i32 {
     let repo_root = git_toplevel().unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
 
     // ── Registries: global baseline + repo overrides, merged. ──────────────
+    //
+    // "Nothing more specific was asked for" means no --registry AND no
+    // $COMMITWARD_REGISTRY — the latter is checked again here, not only inside
+    // `default_registry()`, because the embedded fallback below must NOT trigger
+    // when an operator named a specific path that happens to be missing (that stays
+    // the old INACTIVE warning: they asked for something, and it isn't there).
+    let used_default_path = registry.is_none() && std::env::var("COMMITWARD_REGISTRY").is_err();
     let global_path = registry.unwrap_or_else(default_registry);
-    if !global_path.exists() {
-        eprintln!(
-            "commitward: WARNING global checkpoint registry not found at {} — \
-             global baseline INACTIVE (only repo-local overrides apply). Pass --registry or set \
-             COMMITWARD_REGISTRY. (fail-open: continuing)",
-            global_path.display()
-        );
-    }
-    let global_cps = match load_checkpoints(&global_path) {
-        Ok(c) => c,
-        Err(e) => {
+    let global_cps = if !global_path.exists() {
+        if used_default_path {
             eprintln!(
-                "commitward: registry load error (fail-open): {}: {e}",
+                "commitward: NOTE global checkpoint registry not found at {} — using the \
+                 compiled-in default baseline (commitward#30). Place a checkpoints.yaml there, \
+                 or set COMMITWARD_REGISTRY / pass --registry, to use a different one.",
+                global_path.display()
+            );
+            parse_checkpoints(SHIPPED_REGISTRY).unwrap_or_else(|e| {
+                eprintln!(
+                    "commitward: compiled-in default baseline failed to parse (fail-open): {e}"
+                );
+                vec![]
+            })
+        } else {
+            eprintln!(
+                "commitward: WARNING global checkpoint registry not found at {} — \
+                 global baseline INACTIVE (only repo-local overrides apply). Pass --registry or \
+                 set COMMITWARD_REGISTRY. (fail-open: continuing)",
                 global_path.display()
             );
             vec![]
+        }
+    } else {
+        match load_checkpoints(&global_path) {
+            Ok(c) => c,
+            Err(e) => {
+                eprintln!(
+                    "commitward: registry load error (fail-open): {}: {e}",
+                    global_path.display()
+                );
+                vec![]
+            }
         }
     };
 

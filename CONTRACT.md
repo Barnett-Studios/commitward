@@ -110,8 +110,17 @@ commitward [OPTIONS]
 | `--base <ref>` | `origin/main` | diff `<ref>..HEAD` |
 | `--cached` | off | diff the staged index against HEAD (used by the commit-msg hook) |
 | `--commit-msg-file <path>` | — | file holding the commit message to scan for `HITL-ACK:` trailers |
-| `--registry <path>` | `$COMMITWARD_REGISTRY`, else `checkpoints.yaml` beside the binary | global checkpoint baseline |
+| `--registry <path>` | `$COMMITWARD_REGISTRY`, else `checkpoints.yaml` beside the binary, else the compiled-in shipped baseline if neither is reachable | global checkpoint baseline |
 | `--repo-registry <path>` | `.commitward/checkpoints.yaml` | repo-local overrides (override global by name) |
+
+The compiled-in fallback (commitward#30) applies ONLY when neither `--registry` nor
+`$COMMITWARD_REGISTRY` was given at all — an explicit path that happens to be missing still
+fails open with the old "global baseline INACTIVE" warning, not the fallback, because an
+operator who named a specific file asked for that file. It exists because `cargo install`
+places only the `[[bin]]` target: nothing puts `checkpoints.yaml` beside the installed
+binary, so the documented crates.io install route left every shipped checkpoint inactive
+with no way to reach them short of a container (which bakes the file in and sets
+`COMMITWARD_REGISTRY`, see below) or a manually-placed file.
 
 Both registry paths, plus the installed `commit-msg` hook and `install-hook.sh`, are guarded by the
 default `gate-self-mod` checkpoint. A registry located via `$COMMITWARD_REGISTRY` cannot be matched
