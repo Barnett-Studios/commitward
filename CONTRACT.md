@@ -51,7 +51,8 @@ Those two entries do not survive removal of themselves — they live in the file
 `checkpoint-removed` additionally needs base checkpoint names, so with no resolvable base ref it
 cannot fire at all. A registry cannot be the sole thing that protects the registry.
 
-**It now says so instead of passing quietly (commitward#4).** Two states were being conflated. An
+**It now says so instead of passing quietly (commitward#4, PR #12, unreleased as of v0.3.0 —
+commitward#33).** Two states were being conflated. An
 unresolvable base ref — a shallow clone, an unknown base, a repository with no commits — means the
 guard *did not run*; a base ref that resolves to a commit with no registry means it ran and found
 nothing to have been removed. Only the first is `base_checkpoint_names: None`, and only the first
@@ -60,7 +61,11 @@ un-runnable guard was indistinguishable from a clean one — the fail-*silent* d
 front door the `gate` envelope's `body.warnings` did not cover. The CLI's `--format json` now
 carries the same `warnings` array, and the warning is conditional on a `checkpoint_removed` entry
 actually being compiled: on a registry that declares none, nothing was disabled, and a warning on
-the ordinary path is one operators learn to skip.
+the ordinary path is one operators learn to skip. **Both the unresolvable-base warning and the
+`--format json` `warnings` array are PR #12 (commitward#4) — on `main`, not in published v0.3.0**;
+`commitward --registry good.yaml --base no/such/ref --format json` on v0.3.0 returns
+`{"acked": [], "fired": [], "unacked": []}` with empty stderr and exit 0 — a genuinely silent
+fail-open, the one shape this guarantee says must not happen (commitward#33).
 
 **A registry is recognised by the paths in play, not only by its filename.** `checkpoint-removed`
 requires the change to touch a registry, and the library's default test is the `checkpoints.yaml`
@@ -77,7 +82,8 @@ and applies it last so a same-named on-disk entry cannot shadow it. It watches t
 (`checkpoints.yaml` at any depth, `.commitward/checkpoints.yaml`, any file named `commit-msg` at
 any depth, `install-hook.sh`).
 
-The hook pattern is deliberately not a list of hook-directory conventions. `install-hook.sh` takes
+The hook pattern is deliberately not a list of hook-directory conventions (**PR #16, commitward#14
+— on `main`, not in published v0.3.0; see commitward#33**). `install-hook.sh` takes
 the hooks directory as its first argument (else `$COMMITWARD_HOOKS_DIR`, else the repo-local hooks
 dir), so the set of installable locations is open and no enumeration can be complete — the previous
 list named `.git-hooks/` and `.git/hooks/`, the second of which git can never show in a diff because
