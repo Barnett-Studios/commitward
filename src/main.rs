@@ -125,6 +125,24 @@ struct GateRequest {
 }
 
 fn gate_envelope(input: &str) -> Result<String, String> {
+    // Global off switch (commitward#21): --help says "Disable entirely with
+    // COMMITWARD_HITL=off", and the native CLI honours that on its own path (see `run()`),
+    // but `gate` is reached through the same binary and the same documented switch — a
+    // consumer should not have to know there's a second place this needs setting. Exit
+    // stays 0/`status: ok` (ADR-0052: only an infrastructure error is non-zero here), and
+    // `exit_class` goes to 0 so a disabled gate can never read as a block. Fail-open is not
+    // fail-silent (CONTRACT.md): the warning says the gate did not evaluate, so this is not
+    // mistaken for "evaluated and clean".
+    if std::env::var("COMMITWARD_HITL").as_deref() == Ok("off") {
+        let body = serde_json::json!({
+            "fired": Vec::<serde_json::Value>::new(),
+            "unacked": Vec::<String>::new(),
+            "exit_class": 0,
+            "warnings": ["COMMITWARD_HITL=off — the gate did not evaluate; no checkpoint could fire"],
+        });
+        return Ok(ok_envelope(body));
+    }
+
     let req: GateRequest =
         serde_json::from_str(input).map_err(|e| format!("invalid gate request JSON: {e}"))?;
 
