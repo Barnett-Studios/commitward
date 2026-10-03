@@ -41,6 +41,16 @@ must never be reported as a check that passed. Concretely (commitward#7):
   counted, and the warning is conditional on such a checkpoint actually being compiled, so a
   registry that declares no content checkpoints is not warned about added lines. Behaviour is
   unchanged: `exit_class` and the fail-open posture are exactly what they were.
+- `checkpoint_removed` can only recognise a registry by its path — the `checkpoints.yaml`
+  suffix, or a path the caller names. The `gate` envelope had no field for the latter at all
+  (commitward#24): `detect_with_registry_paths`'s registry-path parameter, which the native
+  CLI already feeds from `--registry`/`--repo-registry`, was unreachable from this front
+  door, so a registry under any other name — `.commitward/checkpoints.yaml`'s own
+  conventional alternate spelling included — defeated `checkpoint_removed`, `gate-self-mod`,
+  and the compiled-in anchor alike, with `exit_class: 0` and no warning. `gate` now accepts
+  `global_registry_path`/`repo_registry_path`, and when `checkpoint_removed` is compiled, a
+  base is known, and still nothing recognisable as a registry changed, `body.warnings` says
+  so rather than reporting the same `fired: []` a clean registry would.
 
 **The default registry carries self-protection, with a documented residual.** The shipped
 `checkpoints.yaml` carries `gate-self-mod` (path) and `checkpoint-removed` (semantic), so removing
@@ -176,6 +186,11 @@ pub fn detect_with_registry_paths(                // as `detect`, plus the repo-
     registry_paths: &[String],
 ) -> Vec<Fired>;
 pub fn checkpoint_removed_is_compiled(checkpoints: &[CompiledCheckpoint]) -> bool;
+pub fn registry_touched(files: &[FileEntry], registry_paths: &[String]) -> bool;  // did any
+    // changed path look like a registry — the `checkpoints.yaml` suffix or a caller-named
+    // path? Lets a caller distinguish "the guard ran and found nothing to remove" from "no
+    // changed path was recognised as a registry at all" (commitward#24); both read as
+    // `fired: []` from `detect`/`detect_with_registry_paths` alone.
 pub fn extract_acks(commit_msg: &str) -> Vec<Ack>;
 pub fn partition_ack<'a>(fired: &'a [Fired], acks: &[Ack]) -> (Vec<&'a Fired>, Vec<&'a Fired>);
 pub fn exit_class(fired_len: usize, unacked_len: usize) -> i32; // 0 | 1 | 2, self-contained

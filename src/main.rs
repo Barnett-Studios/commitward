@@ -12,9 +12,9 @@ use std::process::Command;
 
 use commitward::gitdiff::{parse_added_lines, parse_name_status};
 use commitward::{
-    checkpoint_removed_is_compiled, compile, detect, detect_with_registry_paths, exit_class,
-    extract_acks, extract_checkpoint_names, load_checkpoints, merge, parse_checkpoints,
-    partition_ack, Checkpoint, FileEntry, Mode, SemanticKind,
+    checkpoint_removed_is_compiled, compile, detect_with_registry_paths, exit_class, extract_acks,
+    extract_checkpoint_names, load_checkpoints, merge, parse_checkpoints, partition_ack,
+    registry_touched, Checkpoint, FileEntry, Mode, SemanticKind,
 };
 use serde::Deserialize;
 
@@ -122,6 +122,16 @@ struct GateRequest {
     /// unions base names from both `promise/checkpoints.yaml` and `.dotclaude/checkpoints.yaml`.
     #[serde(default)]
     base_global_registry_yaml: Option<String>,
+    /// The repo-relative path `global_registry_yaml` was loaded from, when it is not named
+    /// `checkpoints.yaml` (commitward#24). The `gate` request has no filesystem to resolve a
+    /// path from — the `checkpoint_removed` guard's only other signal is the suffix
+    /// convention, so a registry under any other name needs the caller to name it, the same
+    /// parity `detect_with_registry_paths` already gives the native CLI via `--registry`.
+    #[serde(default)]
+    global_registry_path: Option<String>,
+    /// As `global_registry_path`, for `repo_registry_yaml` (the native CLI's `--repo-registry`).
+    #[serde(default)]
+    repo_registry_path: Option<String>,
 }
 
 fn gate_envelope(input: &str) -> Result<String, String> {
@@ -183,7 +193,21 @@ fn gate_envelope(input: &str) -> Result<String, String> {
             }
         };
 
-    let fired = detect(&compiled, &files, &added, base_names.as_deref());
+    // commitward#24: `checkpoint_removed`'s only other signal besides the `checkpoints.yaml`
+    // suffix is a caller-named path — the `gate` request has no filesystem to resolve one
+    // from, so a registry under any other name needs it supplied explicitly.
+    let registry_paths: Vec<String> = [&req.global_registry_path, &req.repo_registry_path]
+        .into_iter()
+        .filter_map(|p| p.clone())
+        .collect();
+
+    let fired = detect_with_registry_paths(
+        &compiled,
+        &files,
+        &added,
+        base_names.as_deref(),
+        &registry_paths,
+    );
     let acks = extract_acks(&req.commit_msg);
     let (_acked, unacked) = partition_ack(&fired, &acks);
     let ec = exit_class(fired.len(), unacked.len());
@@ -206,6 +230,23 @@ fn gate_envelope(input: &str) -> Result<String, String> {
              — the checkpoint-removed guard is INACTIVE for this call, so a checkpoint \
              deleted in this change will not be detected"
                 .to_string(),
+        );
+    } else if checkpoint_removed_is_compiled(&compiled)
+        && !registry_touched(&files, &registry_paths)
+    {
+        // commitward#24, second half: the guard IS compiled and a base IS known, so it ran —
+        // and found nothing to evaluate, because no changed path was recognised as a
+        // registry. That is a different state from "a registry changed and nothing was
+        // removed from it", and both currently report the identical `fired: []`. A registry
+        // named anything other than `checkpoints.yaml` must be named via
+        // `global_registry_path`/`repo_registry_path` for this guard to see it change.
+        warnings.push(
+            "checkpoint_removed is compiled and a base registry was supplied, but no changed \
+             path was recognised as a registry (name_status carries no checkpoints.yaml-\
+             suffixed path, and none matches global_registry_path/repo_registry_path) — a \
+             checkpoint deleted from a registry under another name will not be detected this \
+             run"
+            .to_string(),
         );
     }
 
@@ -604,6 +645,22 @@ fn run() -> i32 {
              commit) — a checkpoint deleted in this change will not be detected. Usual \
              causes: a shallow clone, an unknown base ref, or a repository with no commits."
         ));
+    } else if base_arg.is_some()
+        && checkpoint_removed_is_compiled(&compiled)
+        && !registry_touched(&files, &registry_paths)
+    {
+        // commitward#24, sibling of the `gate` fix: the guard IS compiled and a base IS
+        // known, so it ran and found nothing to evaluate because no changed path was
+        // recognised as a registry — a different state from "a registry changed and
+        // nothing was removed from it", both of which currently report the identical
+        // `fired: []`.
+        warnings.push(
+            "checkpoint_removed is compiled and a base registry was supplied, but no changed \
+             path was recognised as a registry (neither name matches the checkpoints.yaml \
+             suffix nor --registry/--repo-registry) — a checkpoint deleted from a registry \
+             under another name will not be detected this run"
+                .to_string(),
+        );
     }
     for w in &warnings {
         eprintln!("commitward: WARNING {w} (fail-open: continuing)");

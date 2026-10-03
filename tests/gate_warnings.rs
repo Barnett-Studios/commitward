@@ -487,3 +487,88 @@ fn a_vacuous_request_still_reports_exit_class_0_but_no_longer_silently() {
     assert_eq!(code, 0, "process exit moved: {v}");
     assert_eq!(v["status"], "ok", "status moved: {v}");
 }
+
+// ── commitward#24: registry-path parity for `checkpoint_removed` ───────────────────────
+//
+// `Mode::Semantic(CheckpointRemoved)` can only recognise a registry by the
+// `checkpoints.yaml` suffix convention unless the caller names the actual path — the
+// native CLI gets that from `--registry`/`--repo-registry`; `gate` had no field to carry
+// it at all, so a registry under any other name defeated every one of the three guards
+// that key on it (commitward#4's fix, unreachable from this front door).
+
+/// Two checkpoints in the base, one surviving in the current registry — the deletion row-3
+/// of the issue needs to exercise.
+const TWO_CHECKPOINT_BASE_REGISTRY: &str = r#"
+version: "1"
+checkpoints:
+  - name: schema-change
+    summary: a schema file changed
+    paths:
+      - "^schema/"
+  - name: checkpoint-removed
+    summary: a checkpoint was deleted from the registry
+    semantic: checkpoint_removed
+"#;
+
+#[test]
+fn a_registry_named_anything_other_than_checkpoints_yaml_still_fires_checkpoint_removed() {
+    // Row 3 from the issue: the registry moved/renamed to a non-standard path, and the
+    // deletion (schema-change dropped between base and current) must still be caught when
+    // the caller names the path it came from.
+    let (_code, v) = gate(
+        &serde_json::json!({
+            "diff": "",
+            "name_status": "M\tpolicy/gates.yaml",
+            "commit_msg": "chore: drop a guard",
+            "global_registry_yaml": SEMANTIC_ONLY_REGISTRY,
+            "global_registry_path": "policy/gates.yaml",
+            "base_global_registry_yaml": TWO_CHECKPOINT_BASE_REGISTRY,
+        })
+        .to_string(),
+    );
+    let fired: Vec<&str> = v["body"]["fired"]
+        .as_array()
+        .expect("fired array")
+        .iter()
+        .filter_map(|f| f["name"].as_str())
+        .collect();
+    assert!(
+        fired.contains(&"checkpoint-removed"),
+        "checkpoint_removed must fire when global_registry_path names the changed file: {v}"
+    );
+}
+
+#[test]
+fn the_same_deletion_without_a_named_path_does_not_fire_but_says_so() {
+    // The control, and the second acceptance criterion: no `global_registry_path`
+    // supplied, same deletion, same changed file — the guard legitimately cannot see it,
+    // and `body.warnings` must say that rather than report `fired: []` indistinguishably
+    // from "a registry changed and nothing was removed from it".
+    let (_code, v) = gate(
+        &serde_json::json!({
+            "diff": "",
+            "name_status": "M\tpolicy/gates.yaml",
+            "commit_msg": "chore: drop a guard",
+            "global_registry_yaml": SEMANTIC_ONLY_REGISTRY,
+            "base_global_registry_yaml": TWO_CHECKPOINT_BASE_REGISTRY,
+        })
+        .to_string(),
+    );
+    let fired: Vec<&str> = v["body"]["fired"]
+        .as_array()
+        .expect("fired array")
+        .iter()
+        .filter_map(|f| f["name"].as_str())
+        .collect();
+    assert!(
+        !fired.contains(&"checkpoint-removed"),
+        "without the path named, the guard cannot see the registry change: {v}"
+    );
+    assert!(
+        warnings_of(&v)
+            .iter()
+            .any(|w| w.contains("no changed path was recognised as a registry")),
+        "the envelope must say the guard ran but found nothing recognisable as a \
+         registry, not report a bare clean pass: {v}"
+    );
+}
