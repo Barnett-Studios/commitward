@@ -11,13 +11,22 @@ use std::process::{Command, Stdio};
 const BIN: &str = env!("CARGO_BIN_EXE_commitward");
 
 fn gate(request: &str) -> (i32, serde_json::Value) {
-    let mut child = Command::new(BIN)
-        .arg("gate")
+    gate_with_env(request, &[])
+}
+
+fn gate_with_env(request: &str, env: &[(&str, &str)]) -> (i32, serde_json::Value) {
+    let mut cmd = Command::new(BIN);
+    cmd.arg("gate")
+        // COMMITWARD_HITL may be set in the harness's own environment; a test exercising
+        // the off switch sets it explicitly, and every other test must not inherit it.
+        .env_remove("COMMITWARD_HITL")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("spawn commitward gate");
+        .stderr(Stdio::piped());
+    for (k, v) in env {
+        cmd.env(k, v);
+    }
+    let mut child = cmd.spawn().expect("spawn commitward gate");
     child
         .stdin
         .take()
@@ -186,6 +195,102 @@ fn warnings_of(v: &serde_json::Value) -> Vec<String> {
                 .collect()
         })
         .unwrap_or_default()
+}
+
+// commitward#21: --help says "Disable entirely with COMMITWARD_HITL=off", and
+// `install-hook.sh` plus the native CLI both honour it, but `gate` evaluated the request
+// anyway — the documented off switch was inert on this front door. `exit_class: 2` is
+// what a request with real checkpoints firing would return whether or not the switch was
+// set, which is the defect: the switch changed nothing observable.
+#[test]
+fn commitward_hitl_off_disables_the_gate_envelope_too() {
+    let (code, v) = gate_with_env(
+        &serde_json::json!({
+            "diff": DEPLOY_DIFF,
+            "name_status": "M\tscripts/deploy.sh",
+            "commit_msg": "chore: ship it",
+            "global_registry_yaml": CONTENT_ONLY_REGISTRY,
+        })
+        .to_string(),
+        &[("COMMITWARD_HITL", "off")],
+    );
+    assert_eq!(
+        code, 0,
+        "the off switch must still be a clean process exit: {v}"
+    );
+    assert_eq!(
+        v["status"], "ok",
+        "off switch must not be an error envelope: {v}"
+    );
+    assert_eq!(
+        v["body"]["exit_class"], 0,
+        "off switch must disable the gate's block decision, not just the CLI's: {v}"
+    );
+    assert_eq!(
+        v["body"]["fired"].as_array().map(|a| a.len()),
+        Some(0),
+        "a disabled gate must not report checkpoints as fired: {v}"
+    );
+    // Fail-open is not fail-silent (CONTRACT.md): a consumer reading this envelope must be
+    // able to tell "disabled" apart from "evaluated and clean".
+    assert!(
+        warnings_of(&v)
+            .iter()
+            .any(|w| w.contains("COMMITWARD_HITL")),
+        "the envelope must say the gate was disabled by the off switch, not silently pass: {v}"
+    );
+    // The English in `warnings` is not something a consumer should have to parse to learn
+    // this — `exit_class: 0` + `fired: []` is otherwise indistinguishable from an ordinary
+    // clean pass. `bypassed: true` is the machine-readable signal.
+    assert_eq!(
+        v["body"]["bypassed"], true,
+        "the envelope must carry a machine-readable bypass signal, not just prose: {v}"
+    );
+}
+
+#[test]
+fn only_the_exact_value_off_bypasses_the_gate() {
+    // `OFF`, `0`, `true`, and any other spelling must evaluate normally — the switch is
+    // documented as `COMMITWARD_HITL=off`, not "anything truthy-looking".
+    for not_off in ["OFF", "0", "true", "yes", "on"] {
+        let (_code, v) = gate_with_env(
+            &serde_json::json!({
+                "diff": DEPLOY_DIFF,
+                "name_status": "M\tscripts/deploy.sh",
+                "commit_msg": "chore: ship it",
+                "global_registry_yaml": CONTENT_ONLY_REGISTRY,
+            })
+            .to_string(),
+            &[("COMMITWARD_HITL", not_off)],
+        );
+        assert_eq!(
+            v["body"]["bypassed"], false,
+            "COMMITWARD_HITL={not_off:?} must not bypass the gate: {v}"
+        );
+        assert_eq!(
+            v["body"]["exit_class"], 2,
+            "COMMITWARD_HITL={not_off:?} must not suppress a real fire: {v}"
+        );
+    }
+}
+
+#[test]
+fn an_ordinary_evaluated_request_reports_bypassed_false() {
+    // The control: `bypassed` must be an explicit `false` on the normal path, not merely
+    // absent — a field a consumer must remember is the field they forget to check.
+    let (_code, v) = gate(
+        &serde_json::json!({
+            "diff": "",
+            "name_status": "M\tsrc/lib.rs",
+            "commit_msg": "chore: something",
+            "global_registry_yaml": GOOD_REGISTRY,
+        })
+        .to_string(),
+    );
+    assert_eq!(
+        v["body"]["bypassed"], false,
+        "an ordinary evaluated request must carry bypassed: false, not an absent field: {v}"
+    );
 }
 
 #[test]

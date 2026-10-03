@@ -142,7 +142,16 @@ added lines were never scanned against the denylist and the run exited 0 like an
 stripped — trimming all trailing whitespace ate a space belonging to the path itself. `--no-renames` is deliberate — a rename of a guarded
 file surfaces as delete-old + add-new, so a guard on the *old* path still fires.
 
-**Off switch:** `COMMITWARD_HITL=off` → exit 0 unconditionally.
+**Off switch:** `COMMITWARD_HITL=off` → exit 0 unconditionally. Also honoured by the `gate`
+envelope below (commitward#21) — same variable, same binary, so one switch disables both front
+doors. The envelope stays `status: "ok"` with `exit_class: 0`, carrying a `body.warnings` entry
+naming the override, rather than exiting non-zero: fail-open is not fail-silent, so a disabled
+gate must say it did not evaluate rather than exit in a way a caller could mistake for the
+infrastructure-error path. `body.bypassed` is the machine-readable form of the same fact —
+`true` only when the off switch short-circuited this call, `false` on every other path
+(never absent): `exit_class: 0` with `fired: []` is otherwise indistinguishable from an
+ordinary clean pass unless a consumer parses the English in `warnings`. Only the exact value
+`off` triggers it — `OFF`, `0`, `true`, and any other spelling evaluate normally.
 
 **Exit codes:** `0` none-fired-or-fail-open · `1` fired+all-acked · `2` fired+unacked ·
 `64` usage error.
