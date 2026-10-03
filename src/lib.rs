@@ -193,6 +193,38 @@ pub fn checkpoint_removed_is_compiled(checkpoints: &[CompiledCheckpoint]) -> boo
         .any(|c| matches!(c.mode, Mode::Semantic(SemanticKind::CheckpointRemoved)))
 }
 
+/// Strip a leading `./` — the one normalization every caller-supplied path needs before
+/// comparison, whether it came from a diff's `name-status` output or from a request field a
+/// program assembled by hand.
+fn normalize_path(p: &str) -> &str {
+    p.strip_prefix("./").unwrap_or(p)
+}
+
+/// Does `changed` (a path from the diff) name the same file as `registry_path` (a
+/// caller-supplied registry location)? Exact after stripping a leading `./` from both; an
+/// absolute `registry_path` also matches when `changed` is its tail (no filesystem access
+/// here to resolve "relative to repo root" properly, so this is the closest approximation
+/// available to a caller with no checkout — the CLI's own `--registry` resolution already
+/// goes through `repo_relative()` before either path reaches this function).
+fn paths_match(changed: &str, registry_path: &str) -> bool {
+    let changed = normalize_path(changed);
+    let registry_path = normalize_path(registry_path);
+    if changed == registry_path {
+        return true;
+    }
+    if let Some(abs) = registry_path.strip_prefix('/') {
+        if abs == changed || abs.ends_with(&format!("/{changed}")) {
+            return true;
+        }
+    }
+    if let Some(abs) = changed.strip_prefix('/') {
+        if abs == registry_path || abs.ends_with(&format!("/{registry_path}")) {
+            return true;
+        }
+    }
+    false
+}
+
 /// Does any entry in `files` look like a registry — either by the `checkpoints.yaml`
 /// suffix convention or by matching one of the caller-supplied `registry_paths`?
 ///
@@ -203,7 +235,8 @@ pub fn checkpoint_removed_is_compiled(checkpoints: &[CompiledCheckpoint]) -> boo
 /// guard evaluated anything (commitward#24).
 pub fn registry_touched(files: &[FileEntry], registry_paths: &[String]) -> bool {
     files.iter().any(|f| {
-        f.path.ends_with("checkpoints.yaml") || registry_paths.iter().any(|r| r == &f.path)
+        f.path.ends_with("checkpoints.yaml")
+            || registry_paths.iter().any(|r| paths_match(&f.path, r))
     })
 }
 

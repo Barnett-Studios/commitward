@@ -231,23 +231,44 @@ fn gate_envelope(input: &str) -> Result<String, String> {
              deleted in this change will not be detected"
                 .to_string(),
         );
-    } else if checkpoint_removed_is_compiled(&compiled)
-        && !registry_touched(&files, &registry_paths)
-    {
-        // commitward#24, second half: the guard IS compiled and a base IS known, so it ran —
-        // and found nothing to evaluate, because no changed path was recognised as a
-        // registry. That is a different state from "a registry changed and nothing was
-        // removed from it", and both currently report the identical `fired: []`. A registry
-        // named anything other than `checkpoints.yaml` must be named via
-        // `global_registry_path`/`repo_registry_path` for this guard to see it change.
-        warnings.push(
-            "checkpoint_removed is compiled and a base registry was supplied, but no changed \
-             path was recognised as a registry (name_status carries no checkpoints.yaml-\
-             suffixed path, and none matches global_registry_path/repo_registry_path) — a \
-             checkpoint deleted from a registry under another name will not be detected this \
-             run"
-            .to_string(),
-        );
+    }
+    // commitward#24, second half, redesigned per review: the first cut warned off a
+    // diff-touched heuristic (`registry_touched`), which fired on every ordinary commit
+    // (nothing touches the registry, so "not touched" was always true) and could be
+    // silenced by an unrelated decoy file matching the `checkpoints.yaml` suffix while a
+    // real deletion in the actually-named registry went unreported. The replacement asks a
+    // purely structural question with no diff involved at all: for each side the caller
+    // EXPLICITLY named a custom path for (`global_registry_path`/`repo_registry_path`), is
+    // that side's own base content (`base_global_registry_yaml`/`base_repo_registry_yaml`)
+    // actually present? If a path is named but its base is missing, `checkpoint_removed`
+    // cannot verify that specific registry regardless of what the diff says — and if no
+    // custom path was ever named, the default `checkpoints.yaml` convention already covers
+    // it without needing this check at all, so an ordinary commit never reaches it.
+    let mut guard_unverified = false;
+    if checkpoint_removed_is_compiled(&compiled) {
+        let mut unverifiable: Vec<String> = Vec::new();
+        if let Some(p) = &req.global_registry_path {
+            if req.base_global_registry_yaml.is_none() {
+                unverifiable.push(format!(
+                    "global registry at {p:?} has no base_global_registry_yaml"
+                ));
+            }
+        }
+        if let Some(p) = &req.repo_registry_path {
+            if req.base_repo_registry_yaml.is_none() {
+                unverifiable.push(format!(
+                    "repo registry at {p:?} has no base_repo_registry_yaml"
+                ));
+            }
+        }
+        if !unverifiable.is_empty() {
+            guard_unverified = true;
+            warnings.push(format!(
+                "checkpoint_removed cannot verify removal for: {} — a checkpoint deleted from \
+                 that registry will not be detected this run",
+                unverifiable.join("; ")
+            ));
+        }
     }
 
     // commitward#20: the warnings above cover the REGISTRY inputs and said nothing about the
@@ -347,6 +368,9 @@ fn gate_envelope(input: &str) -> Result<String, String> {
         "unacked": unacked_names,
         "exit_class": ec,
         "bypassed": false,
+        // Structured, not just the English in `warnings`: a consumer that wants to branch
+        // on "can this call's checkpoint_removed result be trusted" without parsing prose.
+        "guard_unverified": guard_unverified,
         "warnings": warnings,
     });
     Ok(ok_envelope(body))
