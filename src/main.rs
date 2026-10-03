@@ -659,26 +659,25 @@ fn run() -> i32 {
     let name_ref: &str = if cached { "HEAD" } else { base_ref.as_str() };
     let base_ref_resolves = git_rev_parse_commit(&repo_root, name_ref);
     let mut base_names: HashSet<String> = HashSet::new();
-    // Per-path "is this registry verifiable at base" (commitward#24 review round 3) —
+    // Per-path "is this registry verifiable at base" (commitward#24 review round 4) —
     // tracked separately from `base_names` itself, which only records WHICH checkpoints
-    // existed, not WHERE. This is NOT "did `git_show` return content": per the comment
-    // above, an ABSENT file at a resolving ref is itself a determined answer (zero
-    // checkpoints there — the ordinary state of a commit that first adopts the registry),
-    // not an unverifiable one. The only way a named, in-repo path is *unverifiable* once
-    // the ref resolves is if it is OUTSIDE the repo tree, where `git show` cannot address
-    // it at all — a different, already-documented limitation. Defaults to `true`
-    // (verifiable) so a path this loop never reaches (ref does not resolve; the other
-    // branch handles that case entirely) is never mistaken for unverifiable here.
-    let mut repo_base_found = true;
-    let mut global_base_found = true;
+    // existed, not WHERE. Always `true` (verifiable) once `base_ref_resolves` — the CLI
+    // has no "unverifiable" state on this axis at all, unlike `gate`:
+    //
+    //   - Inside the repo, an ABSENT file at a resolving ref is itself a determined
+    //     answer (zero checkpoints there — the ordinary state of a commit that first
+    //     adopts the registry), not an unverifiable one.
+    //   - OUTSIDE the repo tree (an installed `$COMMITWARD_REGISTRY` baseline, say),
+    //     `git show` can never address the path at any ref — but that is a property of
+    //     the registry's LOCATION, not of this commit: no commit's diff could ever make
+    //     it checkable, so there is nothing a per-commit warning would be telling the
+    //     operator to go fix. Flagging it was the round-3 mistake this round undoes.
+    let repo_base_found = true;
+    let global_base_found = true;
     if base_ref_resolves {
-        for (path, found) in [
-            (&repo_path, &mut repo_base_found),
-            (&global_path, &mut global_base_found),
-        ] {
+        for path in [&repo_path, &global_path] {
             let Some(rel) = repo_relative(path, &repo_root) else {
-                *found = false; // outside the repo: no base version exists to read
-                continue;
+                continue; // outside the repo: no base version exists to read, and never will
             };
             if let Some(text) = git_show(&repo_root, name_ref, &rel) {
                 base_names.extend(extract_checkpoint_names(&text));
@@ -718,37 +717,38 @@ fn run() -> i32 {
     // guard being COMPILED — on a registry that declares no `checkpoint_removed` there is
     // nothing to disable, and a warning on the ordinary path is one operators learn to skip.
     let mut warnings: Vec<String> = Vec::new();
+    // commitward#24 review round 4: unlike `gate` (see its own comment above),
+    // `unverifiable_registry_warning` provably never fires for the CLI once the ref
+    // resolves — `global_base_found`/`repo_base_found` are always `true` (see their own
+    // comment above) — but `guard_unverified` is still computed and still exposed via
+    // `--format json`, both for parity with `gate`'s structured field and so a future
+    // state that genuinely cannot be verified has somewhere to report it.
+    let global_label = format!(
+        "global registry at {} has no base content at {name_ref}",
+        global_path.display()
+    );
+    let repo_label = format!(
+        "repo registry at {} has no base content at {name_ref}",
+        repo_path.display()
+    );
+    let guard_unverified_warning = (base_arg.is_some()
+        && checkpoint_removed_is_compiled(&compiled))
+    .then(|| {
+        unverifiable_registry_warning(&[
+            (global_label.as_str(), global_path_named, global_base_found),
+            (repo_label.as_str(), repo_path_named, repo_base_found),
+        ])
+    })
+    .flatten();
+    let guard_unverified = guard_unverified_warning.is_some();
     if base_arg.is_none() && checkpoint_removed_is_compiled(&compiled) {
         warnings.push(format!(
             "checkpoint-removed guard INACTIVE for this run ({name_ref} does not resolve to a \
              commit) — a checkpoint deleted in this change will not be detected. Usual \
              causes: a shallow clone, an unknown base ref, or a repository with no commits."
         ));
-    } else if base_arg.is_some() && checkpoint_removed_is_compiled(&compiled) {
-        // commitward#24 review round 3: the previous version of this branch repeated the
-        // `gate` envelope's own first-cut mistake — a diff-touched heuristic
-        // (`registry_touched`) that fired on nearly every ordinary commit (nothing in an
-        // unrelated change touches the registry, so "not touched" was almost always true)
-        // and could be silenced by an unrelated decoy file matching the `checkpoints.yaml`
-        // suffix while a real deletion in the actually-named registry went unreported.
-        // `unverifiable_registry_warning` is the same structural check `gate` was
-        // redesigned to use: warn only when `--registry`/`$COMMITWARD_REGISTRY` or
-        // `--repo-registry` named a path and no base content was found for it — never
-        // diff-based, so an ordinary commit that touches nothing never reaches a warning.
-        let global_label = format!(
-            "global registry at {} has no base content at {name_ref}",
-            global_path.display()
-        );
-        let repo_label = format!(
-            "repo registry at {} has no base content at {name_ref}",
-            repo_path.display()
-        );
-        if let Some(w) = unverifiable_registry_warning(&[
-            (global_label.as_str(), global_path_named, global_base_found),
-            (repo_label.as_str(), repo_path_named, repo_base_found),
-        ]) {
-            warnings.push(w);
-        }
+    } else if let Some(w) = guard_unverified_warning {
+        warnings.push(w);
     }
     for w in &warnings {
         eprintln!("commitward: WARNING {w} (fail-open: continuing)");
@@ -764,11 +764,12 @@ fn run() -> i32 {
 
     match format.as_str() {
         "json" => {
-            // `warnings` is additive — a consumer reading `fired`/`acked`/`unacked` is
-            // unaffected, and one that only had stderr to go on now has the same signal the
-            // gate envelope already carried.
+            // `warnings`/`guard_unverified` are additive — a consumer reading
+            // `fired`/`acked`/`unacked` is unaffected, and one that only had stderr to go
+            // on now has the same signal the gate envelope already carried.
             let obj = serde_json::json!({
                 "fired": &fired, "acked": &acked, "unacked": &unacked, "warnings": &warnings,
+                "guard_unverified": guard_unverified,
             });
             match serde_json::to_string_pretty(&obj) {
                 Ok(s) => println!("{s}"),

@@ -56,22 +56,35 @@ must never be reported as a check that passed. Concretely (commitward#7):
   not about the registry at all) and false exactly when a decoy file matching the
   `checkpoints.yaml` suffix happened to be touched too, silencing the warning while a real
   deletion in the actually-named registry went unreported. `body.guard_unverified` instead
-  asks a purely structural question with no diff involved: for each side the caller
-  EXPLICITLY named a custom path for (`global_registry_path`/`repo_registry_path`), is that
-  side's own base content (`base_global_registry_yaml`/`base_repo_registry_yaml`) present?
-  An ordinary commit that never names a custom path never reaches the check at all; a named
-  path with its base supplied is fully verifiable regardless of what the diff says.
+  asks a purely structural question with no diff involved — but the two front doors answer
+  it differently, because they have different information available:
 
-  The native CLI carried the identical diff-based mistake in its own copy of this warning
-  (`run()`, same symptoms — fired on nearly every ordinary commit, silenced by a decoy).
-  Both front doors now share one function, `unverifiable_registry_warning`, so the decision
-  cannot drift between them again. The CLI's own translation of "base content present":
-  `git show <ref>:<path>` resolving the path at all (inside the repo) counts as verifiable
-  regardless of whether a checkpoint was actually there — an ABSENT file at a resolving ref
-  is a determined answer (zero checkpoints, the ordinary state of a commit that first
-  adopts a registry), not an unverifiable one. Only a path OUTSIDE the repo tree (an
-  installed `$COMMITWARD_REGISTRY` baseline, say) is unverifiable: `git show` can never
-  address it, at any ref, which is the one case this check exists to name.
+  - **`gate`** warns whenever a side the caller EXPLICITLY named a custom path for
+    (`global_registry_path`/`repo_registry_path`) has no base content present
+    (`base_global_registry_yaml`/`base_repo_registry_yaml`). The envelope has no way to
+    fetch base content itself — the caller either supplies it or doesn't — so `gate`
+    cannot tell "the caller omitted it by mistake" from "the registry genuinely has no
+    base version"; it treats both as unverifiable, on the assumption that when nothing
+    more can be asked, a gap is safer treated as a possible caller bug than waved through.
+  - **The native CLI's `run()`** always attempts to fetch base content itself
+    (`git show <ref>:<path>`) once the base ref resolves, so it can tell the two states
+    apart and does: an ABSENT file at a resolving ref is a determined answer (zero
+    checkpoints there, the ordinary state of a commit that first adopts a registry), not
+    an unverifiable one — `checkpoint_removed`'s own correctness is unaffected either way
+    (removal detection is a name-set diff, independent of this warning). A path OUTSIDE
+    the repo tree (an installed `$COMMITWARD_REGISTRY` baseline, say) is not flagged
+    either: `git show` can never address it at any ref, but that is a property of the
+    registry's LOCATION, not of any one commit — no commit's diff could ever make it
+    checkable, so there is nothing a per-commit warning would be telling the operator to
+    go fix. `run()`'s `guard_unverified` is consequently always `false` today; it is
+    computed and exposed via `--format json` for parity with `gate`'s structured field,
+    and so a future state that genuinely cannot be verified has somewhere to report it.
+
+  An ordinary commit that never names a custom path never reaches either check at all.
+  Both front doors share one function, `unverifiable_registry_warning`, for the actual
+  named-and-not-found decision, so a future change to ITS logic cannot drift between them
+  — but each front door answers "not found" from its own, different notion of what that
+  means, as above.
 
 **The default registry carries self-protection, with a documented residual.** The shipped
 `checkpoints.yaml` carries `gate-self-mod` (path) and `checkpoint-removed` (semantic), so removing

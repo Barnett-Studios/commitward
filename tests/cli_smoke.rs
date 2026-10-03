@@ -479,15 +479,15 @@ fn an_unresolvable_base_warns_that_checkpoint_removed_could_not_run() {
 }
 
 /// The other side, and the one that keeps the warning worth reading: a run whose base
-/// resolves must warn about nothing — including the ordinary case of a commit that is
-/// itself adopting a registry for the first time (so the registry's own base version is
-/// legitimately absent, not unverifiable: an absent file at a resolving ref is a
-/// determined answer, zero checkpoints there, commitward#24). A gate that warns on every
-/// invocation has told the operator to stop reading warnings.
+/// resolves must warn about nothing. A gate that warns on every invocation has told the
+/// operator to stop reading warnings.
 ///
-/// `--registry` is deliberately NOT passed: naming an external path is a different axis
-/// (see `a_named_external_registry_warns_when_it_cannot_be_verified_at_base` below), and
-/// this test's job is the in-repo adoption-commit case alone.
+/// `--registry /nonexistent/global.yaml` is the guard this test exists to prove: a named
+/// registry OUTSIDE the repo tree is not a per-commit concern. `git show` can never
+/// address it at any ref — that is a property of the registry's LOCATION, not of this
+/// commit, so no commit's diff could ever make it checkable and there is nothing a
+/// per-commit warning would tell the operator to go fix (commitward#24 review round 4 —
+/// round 3 flagged this as unverifiable, which was the mistake this restores).
 #[test]
 fn a_resolvable_base_produces_no_warning() {
     let (repo, base) = setup("with-base");
@@ -502,6 +502,8 @@ fn a_resolvable_base_produces_no_warning() {
         &[
             "--base",
             &base,
+            "--registry",
+            "/nonexistent/global.yaml",
             "--repo-registry",
             d.join(".commitward/checkpoints.yaml").to_str().unwrap(),
             "--format",
@@ -516,54 +518,37 @@ fn a_resolvable_base_produces_no_warning() {
     );
 }
 
-/// commitward#24 review round 3: the CLI's own copy of the structural "can this named
-/// registry's removal be verified" check, mirroring the `gate` envelope's
-/// `guard_unverified`. `--registry` names a path outside the repo tree entirely — `git
-/// show <ref>:<path>` can never address it, at any ref, ever, which is the one case this
-/// check exists for (as opposed to the ordinary, transient adoption-commit absence the
-/// test above covers, which must NOT warn).
+/// The same guard through `$COMMITWARD_REGISTRY` rather than `--registry` — the other way
+/// an operator names an external baseline — on an ordinary commit that doesn't even touch
+/// the registry. `guard_unverified` must be the explicit `false`, not merely an empty
+/// `warnings` array, since that field exists precisely so a consumer can check it
+/// structurally (commitward#24 review round 4).
 #[test]
-fn a_named_external_registry_warns_when_it_cannot_be_verified_at_base() {
-    let (repo, base) = setup("with-base-2");
+fn an_external_registry_via_env_var_produces_no_warning_and_guard_unverified_false() {
+    let (repo, base) = setup("with-base-env");
     let d = &repo.dir;
-    // A real, committed repo-registry declaring checkpoint_removed — so the guard is
-    // actually compiled (the anchor alone is Path-mode, not Semantic; this check only
-    // applies once some registry declares the semantic one) — and inside the repo, so
-    // this side is exempt from the warning in its own right (asserted implicitly: the
-    // assertion below checks for the GLOBAL registry specifically, by name).
-    std::fs::write(d.join("checkpoints.yaml"), REMOVED_REGISTRY).unwrap();
-    git(d, &["add", "checkpoints.yaml"]);
-    assert!(git(d, &["commit", "-m", "add repo registry"])
+    std::fs::write(d.join("ordinary.txt"), "unrelated change\n").unwrap();
+    git(d, &["add", "ordinary.txt"]);
+    assert!(git(d, &["commit", "-m", "ordinary commit"])
         .status
         .success());
 
-    let out = commitward(
-        d,
-        &[
-            "--base",
-            &base,
-            "--registry",
-            "/nonexistent/global.yaml",
-            "--repo-registry",
-            d.join("checkpoints.yaml").to_str().unwrap(),
-            "--format",
-            "json",
-        ],
-    );
+    let out = Command::new(BIN)
+        .current_dir(d)
+        .env("COMMITWARD_REGISTRY", "/nonexistent/global.yaml")
+        .args(["--base", &base, "--format", "json"])
+        .output()
+        .expect("run commitward");
     let v = json_of(&out);
-    let warnings: Vec<String> = v["warnings"]
-        .as_array()
-        .map(|a| {
-            a.iter()
-                .filter_map(|w| w.as_str().map(String::from))
-                .collect()
-        })
-        .unwrap_or_default();
-    assert!(
-        warnings
-            .iter()
-            .any(|w| w.contains("global registry") && w.contains("cannot verify removal")),
-        "a named registry outside the repo tree must warn that it cannot be verified: {v}"
+    assert_eq!(
+        v["warnings"].as_array().map(|a| a.len()),
+        Some(0),
+        "an external registry via $COMMITWARD_REGISTRY must not warn on an ordinary \
+         commit: {v}"
+    );
+    assert_eq!(
+        v["guard_unverified"], false,
+        "guard_unverified must be the explicit false, not merely absent: {v}"
     );
 }
 
