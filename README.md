@@ -94,6 +94,13 @@ A checkpoint fires on one of three modes: `paths` (regex over changed file paths
 `semantic` check. commitward ships a default global baseline; a repo adds or overrides
 checkpoints in `.commitward/checkpoints.yaml` (repo entries override global ones by name).
 
+The global baseline resolves `$COMMITWARD_REGISTRY`, then `checkpoints.yaml` next to the
+binary (where the container image and `brew` place it), then falls back to the same
+baseline **compiled into the binary** if neither exists — so `cargo install commitward`,
+which places only the binary, still enforces the shipped checkpoints with no extra step
+(commitward#30). Pass `--registry <path>` or set `$COMMITWARD_REGISTRY` yourself to use a
+different one instead.
+
 ```yaml
 version: "1"
 checkpoints:

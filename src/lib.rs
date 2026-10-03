@@ -215,8 +215,15 @@ pub fn load_checkpoints(path: &Path) -> Result<Vec<Checkpoint>, CheckpointError>
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(vec![]),
         Err(e) => return Err(CheckpointError::Parse(path.to_path_buf(), e.to_string())),
     };
-    let file: CheckpointsFile = serde_yaml::from_str(&text)
-        .map_err(|e| CheckpointError::Parse(path.to_path_buf(), e.to_string()))?;
+    parse_checkpoints(&text).map_err(|e| CheckpointError::Parse(path.to_path_buf(), e))
+}
+
+/// Parse checkpoints from YAML text already in hand — the engine behind
+/// [`load_checkpoints`], also used to parse the compiled-in shipped baseline
+/// (commitward#30) that `include_str!` embeds at build time, which never goes
+/// through a path.
+pub fn parse_checkpoints(text: &str) -> Result<Vec<Checkpoint>, String> {
+    let file: CheckpointsFile = serde_yaml::from_str(text).map_err(|e| e.to_string())?;
     Ok(file.checkpoints)
 }
 
@@ -723,6 +730,27 @@ mod tests {
         let absent = Path::new("/nonexistent/no/such/path/checkpoints.yaml");
         let result = load_checkpoints(absent).expect("absent file returns Ok");
         assert!(result.is_empty());
+    }
+
+    #[test]
+    fn parse_checkpoints_reads_text_with_no_path_involved() {
+        // commitward#30: the compiled-in shipped-baseline fallback parses
+        // `include_str!`'d text directly — there is no path to read from, so
+        // `load_checkpoints` (which only ever reads a file) cannot be the entry point.
+        let text = "version: \"1\"\n\
+checkpoints:\n\
+\x20 - name: from-text\n\
+\x20   summary: parsed without touching a filesystem\n\
+\x20   paths:\n\
+\x20     - \"(^|/)x\\\\.txt$\"\n";
+        let cps = parse_checkpoints(text).expect("valid YAML text must parse");
+        assert_eq!(cps.len(), 1);
+        assert_eq!(cps[0].name, "from-text");
+    }
+
+    #[test]
+    fn parse_checkpoints_rejects_malformed_text() {
+        assert!(parse_checkpoints("not: valid: yaml: [\n").is_err());
     }
 
     #[test]
