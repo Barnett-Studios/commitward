@@ -85,7 +85,7 @@ this path is silence rather than a wrong answer.
 
 ```toml
 [dependencies]
-commitward = "0.1"
+commitward = "0.3"
 ```
 
 ```rust
