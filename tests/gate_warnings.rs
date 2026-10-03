@@ -239,6 +239,58 @@ fn commitward_hitl_off_disables_the_gate_envelope_too() {
             .any(|w| w.contains("COMMITWARD_HITL")),
         "the envelope must say the gate was disabled by the off switch, not silently pass: {v}"
     );
+    // The English in `warnings` is not something a consumer should have to parse to learn
+    // this — `exit_class: 0` + `fired: []` is otherwise indistinguishable from an ordinary
+    // clean pass. `bypassed: true` is the machine-readable signal.
+    assert_eq!(
+        v["body"]["bypassed"], true,
+        "the envelope must carry a machine-readable bypass signal, not just prose: {v}"
+    );
+}
+
+#[test]
+fn only_the_exact_value_off_bypasses_the_gate() {
+    // `OFF`, `0`, `true`, and any other spelling must evaluate normally — the switch is
+    // documented as `COMMITWARD_HITL=off`, not "anything truthy-looking".
+    for not_off in ["OFF", "0", "true", "yes", "on"] {
+        let (_code, v) = gate_with_env(
+            &serde_json::json!({
+                "diff": DEPLOY_DIFF,
+                "name_status": "M\tscripts/deploy.sh",
+                "commit_msg": "chore: ship it",
+                "global_registry_yaml": CONTENT_ONLY_REGISTRY,
+            })
+            .to_string(),
+            &[("COMMITWARD_HITL", not_off)],
+        );
+        assert_eq!(
+            v["body"]["bypassed"], false,
+            "COMMITWARD_HITL={not_off:?} must not bypass the gate: {v}"
+        );
+        assert_eq!(
+            v["body"]["exit_class"], 2,
+            "COMMITWARD_HITL={not_off:?} must not suppress a real fire: {v}"
+        );
+    }
+}
+
+#[test]
+fn an_ordinary_evaluated_request_reports_bypassed_false() {
+    // The control: `bypassed` must be an explicit `false` on the normal path, not merely
+    // absent — a field a consumer must remember is the field they forget to check.
+    let (_code, v) = gate(
+        &serde_json::json!({
+            "diff": "",
+            "name_status": "M\tsrc/lib.rs",
+            "commit_msg": "chore: something",
+            "global_registry_yaml": GOOD_REGISTRY,
+        })
+        .to_string(),
+    );
+    assert_eq!(
+        v["body"]["bypassed"], false,
+        "an ordinary evaluated request must carry bypassed: false, not an absent field: {v}"
+    );
 }
 
 #[test]

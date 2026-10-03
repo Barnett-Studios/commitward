@@ -138,6 +138,12 @@ fn gate_envelope(input: &str) -> Result<String, String> {
             "fired": Vec::<serde_json::Value>::new(),
             "unacked": Vec::<String>::new(),
             "exit_class": 0,
+            // Machine-readable, not just the English in `warnings`: `exit_class: 0` with
+            // `fired: []` is indistinguishable from an ordinary clean pass unless a
+            // consumer parses prose. `bypassed: true` here, `false` on every other path
+            // (never absent — a field a consumer must remember to check for is a field
+            // they will eventually forget to check for) is the one thing to test instead.
+            "bypassed": true,
             "warnings": ["COMMITWARD_HITL=off — the gate did not evaluate; no checkpoint could fire"],
         });
         return Ok(ok_envelope(body));
@@ -299,6 +305,7 @@ fn gate_envelope(input: &str) -> Result<String, String> {
         "fired": &fired,
         "unacked": unacked_names,
         "exit_class": ec,
+        "bypassed": false,
         "warnings": warnings,
     });
     Ok(ok_envelope(body))
