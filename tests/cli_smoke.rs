@@ -479,8 +479,15 @@ fn an_unresolvable_base_warns_that_checkpoint_removed_could_not_run() {
 }
 
 /// The other side, and the one that keeps the warning worth reading: a run whose base
-/// resolves must warn about nothing. A gate that warns on every invocation has told the
-/// operator to stop reading warnings.
+/// resolves must warn about nothing — including the ordinary case of a commit that is
+/// itself adopting a registry for the first time (so the registry's own base version is
+/// legitimately absent, not unverifiable: an absent file at a resolving ref is a
+/// determined answer, zero checkpoints there, commitward#24). A gate that warns on every
+/// invocation has told the operator to stop reading warnings.
+///
+/// `--registry` is deliberately NOT passed: naming an external path is a different axis
+/// (see `a_named_external_registry_warns_when_it_cannot_be_verified_at_base` below), and
+/// this test's job is the in-repo adoption-commit case alone.
 #[test]
 fn a_resolvable_base_produces_no_warning() {
     let (repo, base) = setup("with-base");
@@ -495,8 +502,6 @@ fn a_resolvable_base_produces_no_warning() {
         &[
             "--base",
             &base,
-            "--registry",
-            "/nonexistent/global.yaml",
             "--repo-registry",
             d.join(".commitward/checkpoints.yaml").to_str().unwrap(),
             "--format",
@@ -508,6 +513,57 @@ fn a_resolvable_base_produces_no_warning() {
         Some(0),
         "a resolvable base has nothing to warn about: {}",
         String::from_utf8_lossy(&out.stdout)
+    );
+}
+
+/// commitward#24 review round 3: the CLI's own copy of the structural "can this named
+/// registry's removal be verified" check, mirroring the `gate` envelope's
+/// `guard_unverified`. `--registry` names a path outside the repo tree entirely — `git
+/// show <ref>:<path>` can never address it, at any ref, ever, which is the one case this
+/// check exists for (as opposed to the ordinary, transient adoption-commit absence the
+/// test above covers, which must NOT warn).
+#[test]
+fn a_named_external_registry_warns_when_it_cannot_be_verified_at_base() {
+    let (repo, base) = setup("with-base-2");
+    let d = &repo.dir;
+    // A real, committed repo-registry declaring checkpoint_removed — so the guard is
+    // actually compiled (the anchor alone is Path-mode, not Semantic; this check only
+    // applies once some registry declares the semantic one) — and inside the repo, so
+    // this side is exempt from the warning in its own right (asserted implicitly: the
+    // assertion below checks for the GLOBAL registry specifically, by name).
+    std::fs::write(d.join("checkpoints.yaml"), REMOVED_REGISTRY).unwrap();
+    git(d, &["add", "checkpoints.yaml"]);
+    assert!(git(d, &["commit", "-m", "add repo registry"])
+        .status
+        .success());
+
+    let out = commitward(
+        d,
+        &[
+            "--base",
+            &base,
+            "--registry",
+            "/nonexistent/global.yaml",
+            "--repo-registry",
+            d.join("checkpoints.yaml").to_str().unwrap(),
+            "--format",
+            "json",
+        ],
+    );
+    let v = json_of(&out);
+    let warnings: Vec<String> = v["warnings"]
+        .as_array()
+        .map(|a| {
+            a.iter()
+                .filter_map(|w| w.as_str().map(String::from))
+                .collect()
+        })
+        .unwrap_or_default();
+    assert!(
+        warnings
+            .iter()
+            .any(|w| w.contains("global registry") && w.contains("cannot verify removal")),
+        "a named registry outside the repo tree must warn that it cannot be verified: {v}"
     );
 }
 

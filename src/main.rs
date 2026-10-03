@@ -14,7 +14,7 @@ use commitward::gitdiff::{parse_added_lines, parse_name_status};
 use commitward::{
     checkpoint_removed_is_compiled, compile, detect_with_registry_paths, exit_class, extract_acks,
     extract_checkpoint_names, load_checkpoints, merge, parse_checkpoints, partition_ack,
-    registry_touched, Checkpoint, FileEntry, Mode, SemanticKind,
+    Checkpoint, FileEntry, Mode, SemanticKind,
 };
 use serde::Deserialize;
 
@@ -134,6 +134,37 @@ struct GateRequest {
     repo_registry_path: Option<String>,
 }
 
+/// Per-registry-side verifiability for `checkpoint_removed`, shared by both front doors
+/// (commitward#24 review rounds 2 and 3 — the native CLI's `run()` carried its own copy of
+/// the same diff-touched heuristic the `gate` envelope was redesigned away from, with the
+/// identical bug: it warned on nearly every ordinary commit and could be silenced by an
+/// unrelated decoy file matching the `checkpoints.yaml` suffix convention).
+///
+/// Purely structural, no diff involved: a side is unverifiable when the caller explicitly
+/// named a path for it (`--registry`/`$COMMITWARD_REGISTRY` or `--repo-registry`;
+/// `global_registry_path`/`repo_registry_path` on the `gate` request) but no base content
+/// was found there. An ordinary commit that never names a custom path never reaches this —
+/// the default `checkpoints.yaml` convention is already covered by the suffix rule inside
+/// `detect_with_registry_paths` itself.
+///
+/// `sides` is `(label, path_named, base_found)` per registry side. Returns the shared
+/// `body.warnings`/stderr message, or `None` if every named side is verifiable.
+fn unverifiable_registry_warning(sides: &[(&str, bool, bool)]) -> Option<String> {
+    let unverifiable: Vec<&str> = sides
+        .iter()
+        .filter(|(_, named, found)| *named && !*found)
+        .map(|(label, _, _)| *label)
+        .collect();
+    if unverifiable.is_empty() {
+        return None;
+    }
+    Some(format!(
+        "checkpoint_removed cannot verify removal for: {} — a checkpoint deleted from that \
+         registry will not be detected this run",
+        unverifiable.join("; ")
+    ))
+}
+
 fn gate_envelope(input: &str) -> Result<String, String> {
     // Global off switch (commitward#21): --help says "Disable entirely with
     // COMMITWARD_HITL=off", and the native CLI honours that on its own path (see `run()`),
@@ -244,31 +275,33 @@ fn gate_envelope(input: &str) -> Result<String, String> {
     // cannot verify that specific registry regardless of what the diff says — and if no
     // custom path was ever named, the default `checkpoints.yaml` convention already covers
     // it without needing this check at all, so an ordinary commit never reaches it.
-    let mut guard_unverified = false;
-    if checkpoint_removed_is_compiled(&compiled) {
-        let mut unverifiable: Vec<String> = Vec::new();
-        if let Some(p) = &req.global_registry_path {
-            if req.base_global_registry_yaml.is_none() {
-                unverifiable.push(format!(
-                    "global registry at {p:?} has no base_global_registry_yaml"
-                ));
-            }
-        }
-        if let Some(p) = &req.repo_registry_path {
-            if req.base_repo_registry_yaml.is_none() {
-                unverifiable.push(format!(
-                    "repo registry at {p:?} has no base_repo_registry_yaml"
-                ));
-            }
-        }
-        if !unverifiable.is_empty() {
-            guard_unverified = true;
-            warnings.push(format!(
-                "checkpoint_removed cannot verify removal for: {} — a checkpoint deleted from \
-                 that registry will not be detected this run",
-                unverifiable.join("; ")
-            ));
-        }
+    let global_label = format!(
+        "global registry at {:?} has no base_global_registry_yaml",
+        req.global_registry_path.as_deref().unwrap_or_default()
+    );
+    let repo_label = format!(
+        "repo registry at {:?} has no base_repo_registry_yaml",
+        req.repo_registry_path.as_deref().unwrap_or_default()
+    );
+    let guard_unverified_warning = checkpoint_removed_is_compiled(&compiled)
+        .then(|| {
+            unverifiable_registry_warning(&[
+                (
+                    global_label.as_str(),
+                    req.global_registry_path.is_some(),
+                    req.base_global_registry_yaml.is_some(),
+                ),
+                (
+                    repo_label.as_str(),
+                    req.repo_registry_path.is_some(),
+                    req.base_repo_registry_yaml.is_some(),
+                ),
+            ])
+        })
+        .flatten();
+    let guard_unverified = guard_unverified_warning.is_some();
+    if let Some(w) = guard_unverified_warning {
+        warnings.push(w);
     }
 
     // commitward#20: the warnings above cover the REGISTRY inputs and said nothing about the
@@ -519,6 +552,11 @@ fn run() -> i32 {
     // when an operator named a specific path that happens to be missing (that stays
     // the old INACTIVE warning: they asked for something, and it isn't there).
     let used_default_path = registry.is_none() && std::env::var("COMMITWARD_REGISTRY").is_err();
+    // commitward#24 review round 3: "was a custom path named for this side" — captured
+    // before `registry` is consumed below. `!used_default_path` is exactly that: neither
+    // `--registry` nor `$COMMITWARD_REGISTRY` given means the default convention path
+    // applies, which the checkpoint_removed suffix rule already covers without this check.
+    let global_path_named = !used_default_path;
     let global_path = registry.unwrap_or_else(default_registry);
     let global_cps = if !global_path.exists() {
         if used_default_path {
@@ -556,6 +594,7 @@ fn run() -> i32 {
         }
     };
 
+    let repo_path_named = repo_registry.is_some();
     let repo_path = repo_registry.unwrap_or_else(|| repo_root.join(".commitward/checkpoints.yaml"));
     let repo_cps = match load_checkpoints(&repo_path) {
         Ok(c) => c,
@@ -620,10 +659,26 @@ fn run() -> i32 {
     let name_ref: &str = if cached { "HEAD" } else { base_ref.as_str() };
     let base_ref_resolves = git_rev_parse_commit(&repo_root, name_ref);
     let mut base_names: HashSet<String> = HashSet::new();
+    // Per-path "is this registry verifiable at base" (commitward#24 review round 3) —
+    // tracked separately from `base_names` itself, which only records WHICH checkpoints
+    // existed, not WHERE. This is NOT "did `git_show` return content": per the comment
+    // above, an ABSENT file at a resolving ref is itself a determined answer (zero
+    // checkpoints there — the ordinary state of a commit that first adopts the registry),
+    // not an unverifiable one. The only way a named, in-repo path is *unverifiable* once
+    // the ref resolves is if it is OUTSIDE the repo tree, where `git show` cannot address
+    // it at all — a different, already-documented limitation. Defaults to `true`
+    // (verifiable) so a path this loop never reaches (ref does not resolve; the other
+    // branch handles that case entirely) is never mistaken for unverifiable here.
+    let mut repo_base_found = true;
+    let mut global_base_found = true;
     if base_ref_resolves {
-        for path in [&repo_path, &global_path] {
+        for (path, found) in [
+            (&repo_path, &mut repo_base_found),
+            (&global_path, &mut global_base_found),
+        ] {
             let Some(rel) = repo_relative(path, &repo_root) else {
-                continue; // outside the repo: no base version exists to read
+                *found = false; // outside the repo: no base version exists to read
+                continue;
             };
             if let Some(text) = git_show(&repo_root, name_ref, &rel) {
                 base_names.extend(extract_checkpoint_names(&text));
@@ -669,22 +724,31 @@ fn run() -> i32 {
              commit) — a checkpoint deleted in this change will not be detected. Usual \
              causes: a shallow clone, an unknown base ref, or a repository with no commits."
         ));
-    } else if base_arg.is_some()
-        && checkpoint_removed_is_compiled(&compiled)
-        && !registry_touched(&files, &registry_paths)
-    {
-        // commitward#24, sibling of the `gate` fix: the guard IS compiled and a base IS
-        // known, so it ran and found nothing to evaluate because no changed path was
-        // recognised as a registry — a different state from "a registry changed and
-        // nothing was removed from it", both of which currently report the identical
-        // `fired: []`.
-        warnings.push(
-            "checkpoint_removed is compiled and a base registry was supplied, but no changed \
-             path was recognised as a registry (neither name matches the checkpoints.yaml \
-             suffix nor --registry/--repo-registry) — a checkpoint deleted from a registry \
-             under another name will not be detected this run"
-                .to_string(),
+    } else if base_arg.is_some() && checkpoint_removed_is_compiled(&compiled) {
+        // commitward#24 review round 3: the previous version of this branch repeated the
+        // `gate` envelope's own first-cut mistake — a diff-touched heuristic
+        // (`registry_touched`) that fired on nearly every ordinary commit (nothing in an
+        // unrelated change touches the registry, so "not touched" was almost always true)
+        // and could be silenced by an unrelated decoy file matching the `checkpoints.yaml`
+        // suffix while a real deletion in the actually-named registry went unreported.
+        // `unverifiable_registry_warning` is the same structural check `gate` was
+        // redesigned to use: warn only when `--registry`/`$COMMITWARD_REGISTRY` or
+        // `--repo-registry` named a path and no base content was found for it — never
+        // diff-based, so an ordinary commit that touches nothing never reaches a warning.
+        let global_label = format!(
+            "global registry at {} has no base content at {name_ref}",
+            global_path.display()
         );
+        let repo_label = format!(
+            "repo registry at {} has no base content at {name_ref}",
+            repo_path.display()
+        );
+        if let Some(w) = unverifiable_registry_warning(&[
+            (global_label.as_str(), global_path_named, global_base_found),
+            (repo_label.as_str(), repo_path_named, repo_base_found),
+        ]) {
+            warnings.push(w);
+        }
     }
     for w in &warnings {
         eprintln!("commitward: WARNING {w} (fail-open: continuing)");

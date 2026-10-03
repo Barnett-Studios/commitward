@@ -201,11 +201,14 @@ fn normalize_path(p: &str) -> &str {
 }
 
 /// Does `changed` (a path from the diff) name the same file as `registry_path` (a
-/// caller-supplied registry location)? Exact after stripping a leading `./` from both; an
-/// absolute `registry_path` also matches when `changed` is its tail (no filesystem access
-/// here to resolve "relative to repo root" properly, so this is the closest approximation
+/// caller-supplied registry location)? Exact after stripping a leading `./` from both.
+/// Beyond that, whichever of the two is ABSOLUTE matches when the OTHER (relative) one is
+/// its suffix — e.g. an absolute `registry_path` of `/repo/policy/gates.yaml` matches a
+/// `changed` of `policy/gates.yaml` (and symmetrically, an absolute `changed` matches a
+/// relative `registry_path` that is its suffix). There is no filesystem access here to
+/// resolve "relative to repo root" properly, so this is the closest approximation
 /// available to a caller with no checkout — the CLI's own `--registry` resolution already
-/// goes through `repo_relative()` before either path reaches this function).
+/// goes through `repo_relative()` before either path reaches this function.
 fn paths_match(changed: &str, registry_path: &str) -> bool {
     let changed = normalize_path(changed);
     let registry_path = normalize_path(registry_path);

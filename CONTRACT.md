@@ -62,6 +62,17 @@ must never be reported as a check that passed. Concretely (commitward#7):
   An ordinary commit that never names a custom path never reaches the check at all; a named
   path with its base supplied is fully verifiable regardless of what the diff says.
 
+  The native CLI carried the identical diff-based mistake in its own copy of this warning
+  (`run()`, same symptoms — fired on nearly every ordinary commit, silenced by a decoy).
+  Both front doors now share one function, `unverifiable_registry_warning`, so the decision
+  cannot drift between them again. The CLI's own translation of "base content present":
+  `git show <ref>:<path>` resolving the path at all (inside the repo) counts as verifiable
+  regardless of whether a checkpoint was actually there — an ABSENT file at a resolving ref
+  is a determined answer (zero checkpoints, the ordinary state of a commit that first
+  adopts a registry), not an unverifiable one. Only a path OUTSIDE the repo tree (an
+  installed `$COMMITWARD_REGISTRY` baseline, say) is unverifiable: `git show` can never
+  address it, at any ref, which is the one case this check exists to name.
+
 **The default registry carries self-protection, with a documented residual.** The shipped
 `checkpoints.yaml` carries `gate-self-mod` (path) and `checkpoint-removed` (semantic), so removing
 *a* checkpoint and exercising what it guarded in the same commit fires two independent guards rather
@@ -198,10 +209,13 @@ pub fn detect_with_registry_paths(                // as `detect`, plus the repo-
 pub fn checkpoint_removed_is_compiled(checkpoints: &[CompiledCheckpoint]) -> bool;
 pub fn registry_touched(files: &[FileEntry], registry_paths: &[String]) -> bool;  // did any
     // changed path look like a registry — the `checkpoints.yaml` suffix or a caller-named
-    // path (normalized: a leading `./` is stripped, and an absolute `registry_paths` entry
-    // matches a relative changed-path that is its tail)? Used by `detect_with_registry_paths`
-    // itself, not by the `gate` envelope's own `guard_unverified` signal (commitward#24),
-    // which is structural rather than diff-based — see CONTRACT's fail-open section above.
+    // path (normalized: a leading `./` is stripped from both sides, and whichever of the
+    // two — the changed path or the registry_paths entry — is ABSOLUTE matches when the
+    // other, relative one is its suffix)? Used by `detect_with_registry_paths` itself —
+    // the actual firing decision — not by `guard_unverified` (commitward#24), which both
+    // the `gate` envelope and the native CLI's `run()` compute structurally rather than
+    // from the diff: a named registry path with no base content found for it, never
+    // whether anything in the diff looked like a registry at all.
 pub fn extract_acks(commit_msg: &str) -> Vec<Ack>;
 pub fn partition_ack<'a>(fired: &'a [Fired], acks: &[Ack]) -> (Vec<&'a Fired>, Vec<&'a Fired>);
 pub fn exit_class(fired_len: usize, unacked_len: usize) -> i32; // 0 | 1 | 2, self-contained
