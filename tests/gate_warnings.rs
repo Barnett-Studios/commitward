@@ -487,3 +487,207 @@ fn a_vacuous_request_still_reports_exit_class_0_but_no_longer_silently() {
     assert_eq!(code, 0, "process exit moved: {v}");
     assert_eq!(v["status"], "ok", "status moved: {v}");
 }
+
+// ── commitward#24: registry-path parity for `checkpoint_removed` ───────────────────────
+//
+// `Mode::Semantic(CheckpointRemoved)` can only recognise a registry by the
+// `checkpoints.yaml` suffix convention unless the caller names the actual path — the
+// native CLI gets that from `--registry`/`--repo-registry`; `gate` had no field to carry
+// it at all, so a registry under any other name defeated every one of the three guards
+// that key on it (commitward#4's fix, unreachable from this front door).
+
+/// Two checkpoints in the base, one surviving in the current registry — the deletion row-3
+/// of the issue needs to exercise.
+const TWO_CHECKPOINT_BASE_REGISTRY: &str = r#"
+version: "1"
+checkpoints:
+  - name: schema-change
+    summary: a schema file changed
+    paths:
+      - "^schema/"
+  - name: checkpoint-removed
+    summary: a checkpoint was deleted from the registry
+    semantic: checkpoint_removed
+"#;
+
+#[test]
+fn a_registry_named_anything_other_than_checkpoints_yaml_still_fires_checkpoint_removed() {
+    // Row 3 from the issue: the registry moved/renamed to a non-standard path, and the
+    // deletion (schema-change dropped between base and current) must still be caught when
+    // the caller names the path it came from.
+    let (_code, v) = gate(
+        &serde_json::json!({
+            "diff": "",
+            "name_status": "M\tpolicy/gates.yaml",
+            "commit_msg": "chore: drop a guard",
+            "global_registry_yaml": SEMANTIC_ONLY_REGISTRY,
+            "global_registry_path": "policy/gates.yaml",
+            "base_global_registry_yaml": TWO_CHECKPOINT_BASE_REGISTRY,
+        })
+        .to_string(),
+    );
+    let fired: Vec<&str> = v["body"]["fired"]
+        .as_array()
+        .expect("fired array")
+        .iter()
+        .filter_map(|f| f["name"].as_str())
+        .collect();
+    assert!(
+        fired.contains(&"checkpoint-removed"),
+        "checkpoint_removed must fire when global_registry_path names the changed file: {v}"
+    );
+}
+
+// ── commitward#24 redesign (review round 2) ─────────────────────────────────────────
+//
+// The first cut's warning was diff-touched-based (`registry_touched`), which is wrong in
+// both directions: it fires on EVERY ordinary commit (nothing touches the registry, so
+// "not touched" is always true when checkpoint_removed is compiled and a base is known),
+// and a decoy file matching the `checkpoints.yaml` suffix satisfies "touched" and silences
+// it even when the REAL named registry's deletion goes undetected. The replacement is
+// purely structural — no diff involved: for each side the caller explicitly named a custom
+// path for, is that side's own base content present? `guard_unverified` (body field) and
+// the `warnings` entry fire ONLY on that condition.
+
+#[test]
+fn an_ordinary_commit_that_touches_nothing_produces_no_guard_unverified_warning() {
+    // The first direction of the bug: checkpoint_removed compiled, a base known, a custom
+    // path named AND its base supplied (fully verifiable) — an ordinary commit touching an
+    // unrelated file must not warn just because nothing in the diff looks like a registry.
+    let (_code, v) = gate(
+        &serde_json::json!({
+            "diff": "",
+            "name_status": "M\tsrc/lib.rs",
+            "commit_msg": "chore: ordinary change",
+            "global_registry_yaml": TWO_CHECKPOINT_BASE_REGISTRY,
+            "global_registry_path": "policy/gates.yaml",
+            "base_global_registry_yaml": TWO_CHECKPOINT_BASE_REGISTRY,
+        })
+        .to_string(),
+    );
+    assert_eq!(
+        v["body"]["guard_unverified"], false,
+        "a fully-verifiable registry must not warn on a commit that touches nothing: {v}"
+    );
+    assert!(
+        !warnings_of(&v)
+            .iter()
+            .any(|w| w.contains("cannot verify removal")),
+        "no unverifiable-registry warning on an ordinary commit: {v}"
+    );
+}
+
+#[test]
+fn a_decoy_checkpoints_yaml_elsewhere_has_no_effect_on_the_guard() {
+    // The second direction: an unrelated file happening to match the `checkpoints.yaml`
+    // suffix must neither mask a real removal nor change the (purely field-based)
+    // guard_unverified signal. The real registry (named, fully verifiable) still fires on
+    // its own genuine deletion.
+    let (_code, v) = gate(
+        &serde_json::json!({
+            "diff": "",
+            "name_status": "M\tpolicy/gates.yaml\nM\tunrelated/decoy-checkpoints.yaml",
+            "commit_msg": "chore: drop a guard, plus an unrelated file",
+            "global_registry_yaml": SEMANTIC_ONLY_REGISTRY,
+            "global_registry_path": "policy/gates.yaml",
+            "base_global_registry_yaml": TWO_CHECKPOINT_BASE_REGISTRY,
+        })
+        .to_string(),
+    );
+    let fired: Vec<&str> = v["body"]["fired"]
+        .as_array()
+        .expect("fired array")
+        .iter()
+        .filter_map(|f| f["name"].as_str())
+        .collect();
+    assert!(
+        fired.contains(&"checkpoint-removed"),
+        "the real, named registry's deletion must still fire regardless of the decoy: {v}"
+    );
+    assert_eq!(
+        v["body"]["guard_unverified"], false,
+        "fully verifiable: the decoy must not influence guard_unverified either way: {v}"
+    );
+}
+
+#[test]
+fn guard_unverified_when_a_named_registrys_base_is_missing() {
+    // The core new behaviour: a path IS named, but its base is absent — checkpoint_removed
+    // cannot verify that specific registry, and this is now structural (body.guard_unverified)
+    // as well as prose.
+    let (_code, v) = gate(
+        &serde_json::json!({
+            "diff": "",
+            "name_status": "M\tpolicy/gates.yaml",
+            "commit_msg": "chore: drop a guard",
+            "global_registry_yaml": SEMANTIC_ONLY_REGISTRY,
+            "global_registry_path": "policy/gates.yaml",
+            // No base_global_registry_yaml — but SOME base is known overall, via the repo
+            // side, so this does not fall into the pre-existing "no base at all" branch.
+            "repo_registry_yaml": GOOD_REGISTRY,
+            "base_repo_registry_yaml": GOOD_REGISTRY,
+        })
+        .to_string(),
+    );
+    assert_eq!(
+        v["body"]["guard_unverified"], true,
+        "a named registry with no base must be reported as unverifiable: {v}"
+    );
+    assert!(
+        warnings_of(&v)
+            .iter()
+            .any(|w| w.contains("policy/gates.yaml") && w.contains("cannot verify removal")),
+        "the warning must name the unverifiable registry: {v}"
+    );
+}
+
+#[test]
+fn path_normalization_strips_leading_dot_slash_and_matches_absolute_forms() {
+    // `./policy/gates.yaml` in the diff and the plain form in global_registry_path must be
+    // recognised as the same file, and an absolute global_registry_path must match a
+    // relative diff path naming the same file (no filesystem here to resolve against a
+    // repo root, so this is the closest equivalence available to a self-contained request).
+    let (_code, v_dotslash) = gate(
+        &serde_json::json!({
+            "diff": "",
+            "name_status": "M\t./policy/gates.yaml",
+            "commit_msg": "chore: drop a guard",
+            "global_registry_yaml": SEMANTIC_ONLY_REGISTRY,
+            "global_registry_path": "policy/gates.yaml",
+            "base_global_registry_yaml": TWO_CHECKPOINT_BASE_REGISTRY,
+        })
+        .to_string(),
+    );
+    let fired_dotslash: Vec<&str> = v_dotslash["body"]["fired"]
+        .as_array()
+        .expect("fired array")
+        .iter()
+        .filter_map(|f| f["name"].as_str())
+        .collect();
+    assert!(
+        fired_dotslash.contains(&"checkpoint-removed"),
+        "a leading ./ on the diff path must not defeat the match: {v_dotslash}"
+    );
+
+    let (_code, v_abs) = gate(
+        &serde_json::json!({
+            "diff": "",
+            "name_status": "M\tpolicy/gates.yaml",
+            "commit_msg": "chore: drop a guard",
+            "global_registry_yaml": SEMANTIC_ONLY_REGISTRY,
+            "global_registry_path": "/repo/policy/gates.yaml",
+            "base_global_registry_yaml": TWO_CHECKPOINT_BASE_REGISTRY,
+        })
+        .to_string(),
+    );
+    let fired_abs: Vec<&str> = v_abs["body"]["fired"]
+        .as_array()
+        .expect("fired array")
+        .iter()
+        .filter_map(|f| f["name"].as_str())
+        .collect();
+    assert!(
+        fired_abs.contains(&"checkpoint-removed"),
+        "an absolute global_registry_path must still match the relative diff path: {v_abs}"
+    );
+}

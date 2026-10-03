@@ -41,6 +41,50 @@ must never be reported as a check that passed. Concretely (commitward#7):
   counted, and the warning is conditional on such a checkpoint actually being compiled, so a
   registry that declares no content checkpoints is not warned about added lines. Behaviour is
   unchanged: `exit_class` and the fail-open posture are exactly what they were.
+- `checkpoint_removed` can only recognise a registry by its path — the `checkpoints.yaml`
+  suffix, or a path the caller names. The `gate` envelope had no field for the latter at all
+  (commitward#24): `detect_with_registry_paths`'s registry-path parameter, which the native
+  CLI already feeds from `--registry`/`--repo-registry`, was unreachable from this front
+  door, so a registry under any other name — `.commitward/checkpoints.yaml`'s own
+  conventional alternate spelling included — defeated `checkpoint_removed`, `gate-self-mod`,
+  and the compiled-in anchor alike, with `exit_class: 0` and no warning. `gate` now accepts
+  `global_registry_path`/`repo_registry_path`.
+
+  The warning for "this registry cannot be verified" is deliberately NOT diff-based. A first
+  cut asked "did a changed path look like a registry" — true on every ordinary commit's
+  *negation* (nothing looks like a registry, so the warning fired on every commit that was
+  not about the registry at all) and false exactly when a decoy file matching the
+  `checkpoints.yaml` suffix happened to be touched too, silencing the warning while a real
+  deletion in the actually-named registry went unreported. `body.guard_unverified` instead
+  asks a purely structural question with no diff involved — but the two front doors answer
+  it differently, because they have different information available:
+
+  - **`gate`** warns whenever a side the caller EXPLICITLY named a custom path for
+    (`global_registry_path`/`repo_registry_path`) has no base content present
+    (`base_global_registry_yaml`/`base_repo_registry_yaml`). The envelope has no way to
+    fetch base content itself — the caller either supplies it or doesn't — so `gate`
+    cannot tell "the caller omitted it by mistake" from "the registry genuinely has no
+    base version"; it treats both as unverifiable, on the assumption that when nothing
+    more can be asked, a gap is safer treated as a possible caller bug than waved through.
+  - **The native CLI's `run()`** always attempts to fetch base content itself
+    (`git show <ref>:<path>`) once the base ref resolves, so it can tell the two states
+    apart and does: an ABSENT file at a resolving ref is a determined answer (zero
+    checkpoints there, the ordinary state of a commit that first adopts a registry), not
+    an unverifiable one — `checkpoint_removed`'s own correctness is unaffected either way
+    (removal detection is a name-set diff, independent of this warning). A path OUTSIDE
+    the repo tree (an installed `$COMMITWARD_REGISTRY` baseline, say) is not flagged
+    either: `git show` can never address it at any ref, but that is a property of the
+    registry's LOCATION, not of any one commit — no commit's diff could ever make it
+    checkable, so there is nothing a per-commit warning would be telling the operator to
+    go fix. `run()`'s `guard_unverified` is consequently always `false` today; it is
+    computed and exposed via `--format json` for parity with `gate`'s structured field,
+    and so a future state that genuinely cannot be verified has somewhere to report it.
+
+  An ordinary commit that never names a custom path never reaches either check at all.
+  Both front doors share one function, `unverifiable_registry_warning`, for the actual
+  named-and-not-found decision, so a future change to ITS logic cannot drift between them
+  — but each front door answers "not found" from its own, different notion of what that
+  means, as above.
 
 **The default registry carries self-protection, with a documented residual.** The shipped
 `checkpoints.yaml` carries `gate-self-mod` (path) and `checkpoint-removed` (semantic), so removing
@@ -129,7 +173,7 @@ with no way to reach them short of a container (which bakes the file in and sets
 Both registry paths, plus the installed `commit-msg` hook and `install-hook.sh`, are guarded by the
 default `gate-self-mod` checkpoint. A registry located via `$COMMITWARD_REGISTRY` cannot be matched
 by a static pattern — add its path to `gate-self-mod` yourself if you use that variable.
-| `--format <text\|json\|markdown>` | `text` | output format. `json` is `{fired, acked, unacked, warnings}` — `warnings` names the guards that could not run, matching the `gate` envelope's `body.warnings` |
+| `--format <text\|json\|markdown>` | `text` | output format. `json` is `{fired, acked, unacked, warnings, guard_unverified}` — `warnings` names the guards that could not run, matching the `gate` envelope's `body.warnings`; `guard_unverified` matches `body.guard_unverified` (commitward#24) |
 | `-h`, `--help` | — | usage |
 
 **Diff semantics:** commitward shells `git diff -c core.quotePath=false --<mode>
@@ -176,6 +220,15 @@ pub fn detect_with_registry_paths(                // as `detect`, plus the repo-
     registry_paths: &[String],
 ) -> Vec<Fired>;
 pub fn checkpoint_removed_is_compiled(checkpoints: &[CompiledCheckpoint]) -> bool;
+pub fn registry_touched(files: &[FileEntry], registry_paths: &[String]) -> bool;  // did any
+    // changed path look like a registry — the `checkpoints.yaml` suffix or a caller-named
+    // path (normalized: a leading `./` is stripped from both sides, and whichever of the
+    // two — the changed path or the registry_paths entry — is ABSOLUTE matches when the
+    // other, relative one is its suffix)? Used by `detect_with_registry_paths` itself —
+    // the actual firing decision — not by `guard_unverified` (commitward#24), which both
+    // the `gate` envelope and the native CLI's `run()` compute structurally rather than
+    // from the diff: a named registry path with no base content found for it, never
+    // whether anything in the diff looked like a registry at all.
 pub fn extract_acks(commit_msg: &str) -> Vec<Ack>;
 pub fn partition_ack<'a>(fired: &'a [Fired], acks: &[Ack]) -> (Vec<&'a Fired>, Vec<&'a Fired>);
 pub fn exit_class(fired_len: usize, unacked_len: usize) -> i32; // 0 | 1 | 2, self-contained

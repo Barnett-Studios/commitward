@@ -150,11 +150,7 @@ pub fn detect_with_registry_paths(
                 Mode::Semantic(SemanticKind::CheckpointRemoved) => match base_checkpoint_names {
                     None => vec![],
                     Some(base_names) => {
-                        let has_registry_touch = files.iter().any(|f| {
-                            f.path.ends_with("checkpoints.yaml")
-                                || registry_paths.iter().any(|r| r == &f.path)
-                        });
-                        if !has_registry_touch {
+                        if !registry_touched(files, registry_paths) {
                             vec![]
                         } else {
                             base_names
@@ -195,6 +191,56 @@ pub fn checkpoint_removed_is_compiled(checkpoints: &[CompiledCheckpoint]) -> boo
     checkpoints
         .iter()
         .any(|c| matches!(c.mode, Mode::Semantic(SemanticKind::CheckpointRemoved)))
+}
+
+/// Strip a leading `./` — the one normalization every caller-supplied path needs before
+/// comparison, whether it came from a diff's `name-status` output or from a request field a
+/// program assembled by hand.
+fn normalize_path(p: &str) -> &str {
+    p.strip_prefix("./").unwrap_or(p)
+}
+
+/// Does `changed` (a path from the diff) name the same file as `registry_path` (a
+/// caller-supplied registry location)? Exact after stripping a leading `./` from both.
+/// Beyond that, whichever of the two is ABSOLUTE matches when the OTHER (relative) one is
+/// its suffix — e.g. an absolute `registry_path` of `/repo/policy/gates.yaml` matches a
+/// `changed` of `policy/gates.yaml` (and symmetrically, an absolute `changed` matches a
+/// relative `registry_path` that is its suffix). There is no filesystem access here to
+/// resolve "relative to repo root" properly, so this is the closest approximation
+/// available to a caller with no checkout — the CLI's own `--registry` resolution already
+/// goes through `repo_relative()` before either path reaches this function.
+fn paths_match(changed: &str, registry_path: &str) -> bool {
+    let changed = normalize_path(changed);
+    let registry_path = normalize_path(registry_path);
+    if changed == registry_path {
+        return true;
+    }
+    if let Some(abs) = registry_path.strip_prefix('/') {
+        if abs == changed || abs.ends_with(&format!("/{changed}")) {
+            return true;
+        }
+    }
+    if let Some(abs) = changed.strip_prefix('/') {
+        if abs == registry_path || abs.ends_with(&format!("/{registry_path}")) {
+            return true;
+        }
+    }
+    false
+}
+
+/// Does any entry in `files` look like a registry — either by the `checkpoints.yaml`
+/// suffix convention or by matching one of the caller-supplied `registry_paths`?
+///
+/// Shared by `detect_with_registry_paths`'s `CheckpointRemoved` guard and by a caller that
+/// wants to warn separately: `checkpoint_removed` compiled, a base known, yet nothing
+/// recognisable as a registry changed is a DIFFERENT state from "a registry changed and
+/// nothing was removed from it" — both report no fire, and only one of them means the
+/// guard evaluated anything (commitward#24).
+pub fn registry_touched(files: &[FileEntry], registry_paths: &[String]) -> bool {
+    files.iter().any(|f| {
+        f.path.ends_with("checkpoints.yaml")
+            || registry_paths.iter().any(|r| paths_match(&f.path, r))
+    })
 }
 
 /// Wrapper matching the top-level YAML structure.

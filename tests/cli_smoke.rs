@@ -481,6 +481,13 @@ fn an_unresolvable_base_warns_that_checkpoint_removed_could_not_run() {
 /// The other side, and the one that keeps the warning worth reading: a run whose base
 /// resolves must warn about nothing. A gate that warns on every invocation has told the
 /// operator to stop reading warnings.
+///
+/// `--registry /nonexistent/global.yaml` is the guard this test exists to prove: a named
+/// registry OUTSIDE the repo tree is not a per-commit concern. `git show` can never
+/// address it at any ref — that is a property of the registry's LOCATION, not of this
+/// commit, so no commit's diff could ever make it checkable and there is nothing a
+/// per-commit warning would tell the operator to go fix (commitward#24 review round 4 —
+/// round 3 flagged this as unverifiable, which was the mistake this restores).
 #[test]
 fn a_resolvable_base_produces_no_warning() {
     let (repo, base) = setup("with-base");
@@ -508,6 +515,40 @@ fn a_resolvable_base_produces_no_warning() {
         Some(0),
         "a resolvable base has nothing to warn about: {}",
         String::from_utf8_lossy(&out.stdout)
+    );
+}
+
+/// The same guard through `$COMMITWARD_REGISTRY` rather than `--registry` — the other way
+/// an operator names an external baseline — on an ordinary commit that doesn't even touch
+/// the registry. `guard_unverified` must be the explicit `false`, not merely an empty
+/// `warnings` array, since that field exists precisely so a consumer can check it
+/// structurally (commitward#24 review round 4).
+#[test]
+fn an_external_registry_via_env_var_produces_no_warning_and_guard_unverified_false() {
+    let (repo, base) = setup("with-base-env");
+    let d = &repo.dir;
+    std::fs::write(d.join("ordinary.txt"), "unrelated change\n").unwrap();
+    git(d, &["add", "ordinary.txt"]);
+    assert!(git(d, &["commit", "-m", "ordinary commit"])
+        .status
+        .success());
+
+    let out = Command::new(BIN)
+        .current_dir(d)
+        .env("COMMITWARD_REGISTRY", "/nonexistent/global.yaml")
+        .args(["--base", &base, "--format", "json"])
+        .output()
+        .expect("run commitward");
+    let v = json_of(&out);
+    assert_eq!(
+        v["warnings"].as_array().map(|a| a.len()),
+        Some(0),
+        "an external registry via $COMMITWARD_REGISTRY must not warn on an ordinary \
+         commit: {v}"
+    );
+    assert_eq!(
+        v["guard_unverified"], false,
+        "guard_unverified must be the explicit false, not merely absent: {v}"
     );
 }
 
