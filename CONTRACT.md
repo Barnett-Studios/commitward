@@ -173,7 +173,7 @@ with no way to reach them short of a container (which bakes the file in and sets
 Both registry paths, plus the installed `commit-msg` hook and `install-hook.sh`, are guarded by the
 default `gate-self-mod` checkpoint. A registry located via `$COMMITWARD_REGISTRY` cannot be matched
 by a static pattern — add its path to `gate-self-mod` yourself if you use that variable.
-| `--format <text\|json\|markdown>` | `text` | output format. `json` is `{fired, acked, unacked, warnings}` — `warnings` names the guards that could not run, matching the `gate` envelope's `body.warnings` |
+| `--format <text\|json\|markdown>` | `text` | output format. `json` is `{fired, acked, unacked, warnings, guard_unverified}` — `warnings` names the guards that could not run, matching the `gate` envelope's `body.warnings`; `guard_unverified` matches `body.guard_unverified` (commitward#24) |
 | `-h`, `--help` | — | usage |
 
 **Diff semantics:** commitward shells `git diff -c core.quotePath=false --<mode>
