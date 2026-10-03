@@ -32,6 +32,11 @@ brew tap Barnett-Studios/tap && brew install commitward
 cargo install commitward
 ```
 
+Linux release binaries (`x86_64`/`aarch64-unknown-linux-gnu`) target **glibc 2.28+** — Debian 10+,
+Ubuntu 18.04+, RHEL 8+, Amazon Linux 2023, built with [`cargo-zigbuild`](https://github.com/rust-cross/cargo-zigbuild)
+so the floor is pinned rather than inherited from whatever the CI runner's own glibc happens to be
+(.github#20).
+
 **2. Install the git hook (the most common way to use it):**
 
 ```sh
